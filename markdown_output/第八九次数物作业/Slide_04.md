@@ -1,50 +1,25 @@
-# Slide 4
+ 
+### Slide 4  
+**拉普拉斯方程在球坐标系下的分离变量法（方位角部分）**  
 
-## 方位角方程的求解与周期性边界条件
-
-在分离变量法中，角向部分进一步分解为方位角方向的微分方程：
-
+承接 Slide 3 中角度部分分离变量 $\widetilde{Y}(\theta, \varphi) = \Theta(\theta) \Phi(\varphi)$ 的结果，方位角 $\varphi$ 方程为：  
 $$
-\frac{\partial^2 \Phi}{\partial \theta^2} + \lambda \Phi = 0
+\frac{\partial^2 \Phi}{\partial \varphi^2} + \lambda \Phi = 0
+$$  
+由周期性边界条件 $\Phi(\varphi) = \Phi(\varphi + 2\pi)$，$\lambda < 0$ 的指数解不满足物理要求（解在 $2\pi$ 周期内不收敛）。因此，$\lambda > 0$ 且必须为本征值 $\lambda = m^2$（$m = 0, 1, 2, \ldots$）。此时，方程的通解为三角函数形式：  
 $$
+\Phi(\varphi) = A \cos m\varphi + B \sin m\varphi
+$$  
+其中 $A$ 和 $B$ 为常数，由具体边界条件确定。该解严格满足 $2\pi$ 周期性，且与 Slide 3 中设定的常数 $\lambda = m^2$ 一致。
 
-考虑到物理上的周期性边界条件：
-$$
-\Phi(\theta) = \Phi(\theta + 2\pi)
-$$
+## Figure Description  
+手写于白色方格纸的数学推导，内容垂直排列。顶部为方位角微分方程 $\frac{\partial^2 \Phi}{\partial \varphi^2} + \lambda \Phi = 0$，中部说明周期性条件 $\Phi(\varphi) = \Phi(\varphi + 2\pi)$ 及 $\lambda < 0$ 解的排除，底部给出本征值条件 $\lambda = m^2$ 和三角函数解 $\Phi(\varphi) = A \cos m\varphi + B \sin m\varphi$。所有公式为黑色墨水手写体，背景为均匀浅色网格线，无图表或数据图；字迹工整，公式结构清晰，与 Slide 1–3 的推导风格一致。
 
-该条件排除了 $\lambda < 0$ 的指数增长或衰减解（非周期），也排除了 $\lambda = 0$ 以外的常数解不满足非平庸周期性的可能。因此，只允许 $\lambda > 0$ 的振荡解。
-
-设 $\lambda = m^2$，其中 $m = 0, 1, 2, \ldots$，则得到一组离散的本征值：
-
-$$
-\lambda = m^2, \quad m = 0, 1, 2, \ldots
-$$
-
-对应的本征函数为三角函数形式：
-
-$$
-\Phi(\theta) = A \cos m\theta + B \sin m\theta
-$$
-
-这组解满足 $2\pi$-周期性，且构成完备的傅里叶基底，将在球坐标系下拉普拉斯方程的通解构造中起关键作用。
-
----
-
-## Figure Description
-
-图片背景为白色方格纸，线条清晰呈黑色网格，用于对齐书写内容。文字和公式以工整的手写体黑色墨水垂直排列，共四行：  
-第一行为微分方程 $\frac{\partial^2 \Phi}{\partial \theta^2} + \lambda \Phi = 0$；  
-第二行说明因周期性要求，$\lambda < 0$ 的指数解被排除；  
-第三行指出 $\lambda > 0$ 且必须为 $m^2$ 形式，$m$ 为非负整数；  
-第四行为通解表达式 $\Phi(\theta) = A \cos m\theta + B \sin m\theta$。  
-整体布局简洁，重点突出本征值的确定过程与解的形式。
+> [!WARNING] 🛡️ 原文勘误  
+> - **原文**: "$\frac{\partial^2 \Phi}{\partial \theta^2} + \lambda \Phi = 0$" 和 "$\Phi(\theta) = \Phi(\theta + 2\pi)$"  
+> - **疑点**: 在球坐标系分离变量中，$\Phi$ 明确定义为方位角 $\varphi$ 的函数（Slide 3 已设定 $\widetilde{Y}(\theta, \varphi) = \Theta(\theta) \Phi(\varphi)$），但原文误用 $\theta$（极角）作为变量符号。这会导致逻辑矛盾：$\theta$ 的定义域为 $[0, \pi]$，无周期性；而 $\varphi$ 的定义域为 $[0, 2\pi)$，需满足 $2\pi$ 周期性。  
+> - **修正**: 所有 $\theta$ 应统一修正为 $\varphi$，以确保符号一致性与物理意义正确（即 $\frac{\partial^2 \Phi}{\partial \varphi^2} + \lambda \Phi = 0$ 和 $\Phi(\varphi) = \Phi(\varphi + 2\pi)$）。
 
 <CTX>
-{
-  "topic": "方位角方程的本征值问题与周期性解",
-  "keywords": ["方位角方程", "周期性边界条件", "本征值", "三角函数解", "傅里叶基底"],
-  "summary": "本页求解了方位角方向的微分方程，利用周期性边界条件确定了本征值 λ = m²（m 为非负整数），并给出对应的三角函数形式的本征函数，为构建球谐函数奠定基础。",
-  "last_formula_context": "最后一个公式是方位角方向的通解 Φ(θ) = A cos mθ + B sin mθ，将在下一页与极角方程结合，构造完整的角向解。"
-}
+{ "summary": "本页完成球坐标系拉普拉斯方程的角度部分求解，聚焦方位角 $\varphi$ 方程的周期性条件与本征解推导，修正变量符号错误后得到三角函数形式的通解。", "keywords": ["方位角方程", "周期性边界条件", "本征值", "三角函数解", "符号一致性"] }
 </CTX>

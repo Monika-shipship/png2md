@@ -1,45 +1,39 @@
-# Slide 5
+### Slide 5  
+**拉普拉斯方程在柱坐标系下的算子表达式推导**  
 
-本页推导了柱坐标系下的梯度、散度和拉普拉斯算子表达式，基于正交曲线坐标系的标度因子方法。这些微分算子在求解柱对称问题（如圆柱体内的热传导或电磁场）中具有重要作用。
-
-## 柱坐标系下的微分算子
-
-柱坐标系定义为：
-- 坐标变量：$ q_1 = r $, $ q_2 = \varphi $, $ q_3 = z $
-- 标度因子：$ H_1 = 1 $, $ H_2 = r $, $ H_3 = 1 $
-
-### 梯度（Gradient）
+承接坐标系转换的一般方法，柱坐标系 $(r, \varphi, z)$ 的标度因子定义为：  
 $$
-\nabla f = \frac{\partial f}{\partial r} \vec{e}_r + \frac{1}{r} \frac{\partial f}{\partial \varphi} \vec{e}_\varphi + \frac{\partial f}{\partial z} \vec{e}_z
-$$
+H_1 = 1, \quad H_2 = r, \quad H_3 = 1; \quad q_1 = r, \quad q_2 = \varphi, \quad q_3 = z.
+$$  
+基于正交曲线坐标系的梯度、散度和拉普拉斯算子通式，依次推导：  
 
-### 散度（Divergence）
-$$
-\nabla \cdot \vec{a} = \frac{1}{r} \frac{\partial}{\partial r} (r a_r) + \frac{1}{r} \frac{\partial}{\partial \varphi} (a_\varphi) + \frac{\partial}{\partial z} (a_z)
-$$
+1. **梯度算子**：  
+   $$
+   \nabla f = \frac{\partial f}{\partial r} \vec{e_r} + \frac{1}{r} \frac{\partial f}{\partial \varphi} \vec{e_\varphi} + \frac{\partial f}{\partial z} \vec{e_z}
+   $$  
 
-### 拉普拉斯算子（Laplacian）
-首先计算：
-$$
-\nabla^2 u = \nabla \cdot (\nabla u) = \frac{1}{r} \frac{\partial}{\partial r} \left( r \frac{\partial u}{\partial r} \right) + \frac{1}{r} \frac{\partial}{\partial \varphi} \left( \frac{1}{r} \frac{\partial u}{\partial \varphi} \right) + \frac{\partial}{\partial z} \left( \frac{\partial u}{\partial z} \right)
-$$
+2. **散度算子**：  
+   $$
+   \nabla \cdot \vec{a} = \frac{1}{r} \frac{\partial}{\partial r} (r a_r) + \frac{1}{r} \frac{\partial a_\varphi}{\partial \varphi} + \frac{\partial a_z}{\partial z}
+   $$  
 
-简化后得：
-$$
-\nabla^2 u = \frac{1}{r} \frac{\partial}{\partial r} \left( r \frac{\partial u}{\partial r} \right) + \frac{1}{r^2} \frac{\partial^2 u}{\partial \varphi^2} + \frac{\partial^2 u}{\partial z^2}
-$$
+3. **拉普拉斯算子**（通过 $\nabla^2 u = \nabla \cdot (\nabla u)$ 推导）：  
+   $$
+   \nabla^2 u = \frac{1}{r} \frac{\partial}{\partial r} \left( r \frac{\partial u}{\partial r} \right) + \frac{1}{r} \frac{\partial}{\partial \varphi} \left( \frac{1}{r} \frac{\partial u}{\partial \varphi} \right) + \frac{\partial}{\partial z} \left( \frac{\partial u}{\partial z} \right)
+   $$  
+   简化后得标准形式：  
+   $$
+   \nabla^2 u = \frac{1}{r} \frac{\partial}{\partial r} \left( r \frac{\partial u}{\partial r} \right) + \frac{1}{r^2} \frac{\partial^2 u}{\partial \varphi^2} + \frac{\partial^2 u}{\partial z^2}
+   $$  
 
-该表达式是柱坐标系下拉普拉斯方程的标准形式，常用于分离变量法求解偏微分方程。
+## Figure Description  
+手写于浅色方格纸的数学推导，内容垂直排列。顶部为柱坐标系标度因子 $H_1, H_2, H_3$ 及坐标变量 $q_1, q_2, q_3$ 的定义，中部依次展示梯度、散度和拉普拉斯算子的推导过程（含中间步骤 $\nabla \cdot (\nabla u)$ 的展开），底部为拉普拉斯算子的最终简化形式。所有公式为黑色墨水手写体，向量符号以箭头表示（如 $\vec{e_r}$），偏导数使用完整形式 $\frac{\partial}{\partial r}$（修正后），背景为均匀浅色网格线；字迹工整，公式结构清晰，与 Slide 1–4 的推导风格一致。
 
-## Figure Description
-
-图片为方格纸背景的手写内容，文字与公式纵向排列。顶部标注“柱坐标”，随后列出标度因子 $H_i$ 与坐标变量 $q_i$ 的定义。其下依次推导梯度、散度与拉普拉斯算子的表达式。所有公式以手写体书写，符号清晰：向量用箭头标记（如 $\vec{e}_r$），偏导数使用 $\partial$ 符号，角度坐标记为 $\varphi$。无图形图表，仅含数学公式与少量中文注释。公式排版整齐，每行独立，逻辑连贯。
+> [!WARNING] 🛡️ 原文勘误  
+> - **原文**: "$\nabla f = \partial_r f \vec{e_r} + \frac{1}{r} \partial_\varphi f \vec{e_\varphi} + \partial_z f \vec{e_z}$" 和 "$\nabla \cdot \vec{a} = \frac{1}{r} \partial_r (r a_r) + \frac{1}{r} \partial_\varphi (a_\varphi) + \partial_z (a_z)$"  
+> - **疑点**: 在 Slide 3–4 中已强调符号严谨性（如 Slide 4 勘误要求统一使用 $\varphi$ 而非 $\theta$），但此处 $\partial_r$/$\partial_\varphi$/$\partial_z$ 为简写形式，与 Slide 1–4 的完整偏导符号 $\frac{\partial}{\partial r}$/$\frac{\partial}{\partial \varphi}$/$\frac{\partial}{\partial z}$ 不一致。这可能导致初学者混淆（简写 $\partial_r$ 未明确表示偏导算子），且与课程一贯的数学严谨性冲突。  
+> - **修正**: 所有简写 $\partial_r$/$\partial_\varphi$/$\partial_z$ 统一修正为完整形式 $\frac{\partial}{\partial r}$/$\frac{\partial}{\partial \varphi}$/$\frac{\partial}{\partial z}$，以确保符号规范性和教学一致性（例如 $\frac{\partial f}{\partial r}$ 而非 $\partial_r f$）。
 
 <CTX>
-{
-  "topic": "柱坐标系下的微分算子推导",
-  "keywords": ["柱坐标", "标度因子", "梯度", "散度", "拉普拉斯算子"],
-  "summary": "本页基于正交曲线坐标系的通用公式，利用标度因子 H₁=1, H₂=r, H₃=1 推导出柱坐标系下的梯度、散度和拉普拉斯算子表达式，最终得到 ∇²u 的标准形式，为后续分离变量法求解柱域内偏微分方程做准备。",
-  "last_formula_context": "最后一个公式是柱坐标系下的拉普拉斯算子：∇²u = (1/r)∂/∂r(r∂u/∂r) + (1/r²)∂²u/∂φ² + ∂²u/∂z²，将在下一页用于分离变量法求解轴对称问题。"
-}
+{ "summary": "本页系统推导柱坐标系下梯度、散度及拉普拉斯算子的表达式，修正偏导符号简写问题后得到标准拉普拉斯方程形式，为后续分离变量法提供数学基础。", "keywords": ["柱坐标系", "标度因子", "梯度算子", "散度算子", "拉普拉斯算子"] }
 </CTX>

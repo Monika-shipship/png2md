@@ -1,102 +1,47 @@
-# Slide 3
+### Slide 3  
+**拉普拉斯方程在球坐标系下的分离变量法（角度部分）**  
 
-本页继续对球坐标系中拉普拉斯方程的角向部分进行变量分离，进一步将角向函数 $ Y(\theta, \varphi) $ 分离为极角部分 $ \Theta(\theta) $ 和方位角部分 $ \Phi(\varphi) $，最终导出连带勒让德方程与勒让德方程。
+承接 Slide 2 的角度部分方程：  
+$$
+\frac{1}{\sin\theta} \frac{\partial}{\partial \theta} \left( \sin\theta \frac{\partial \widetilde{Y}}{\partial \theta} \right) + \frac{1}{\sin^2\theta} \frac{\partial^2 \widetilde{Y}}{\partial \varphi^2} + l(l+1) \widetilde{Y} = 0
+$$  
+进一步分离变量 $\widetilde{Y}(\theta, \varphi) = \Theta(\theta) \Phi(\varphi)$，代入得：  
+$$
+\Phi \frac{1}{\sin\theta} \frac{\partial}{\partial \theta} \left( \sin\theta \frac{\partial \Theta}{\partial \theta} \right) + \Theta \frac{1}{\sin^2\theta} \frac{\partial^2 \Phi}{\partial \varphi^2} + \Theta \Phi l(l+1) = 0
+$$  
+两边同乘 $\frac{\sin^2\theta}{\Theta \Phi}$ 并整理：  
+$$
+\frac{\sin\theta}{\Theta} \frac{\partial}{\partial \theta} \left( \sin\theta \frac{\partial \Theta}{\partial \theta} \right) + l(l+1) \sin^2\theta = -\frac{1}{\Phi} \frac{\partial^2 \Phi}{\partial \varphi^2}
+$$  
+设等式两侧等于常数 $\lambda$：  
+$$
+\frac{\sin\theta}{\Theta} \frac{\partial}{\partial \theta} \left( \sin\theta \frac{\partial \Theta}{\partial \theta} \right) + l(l+1) \sin^2\theta = \lambda, \quad -\frac{1}{\Phi} \frac{\partial^2 \Phi}{\partial \varphi^2} = \lambda
+$$  
+解得 $\theta$ 方向方程：  
+$$
+\frac{1}{\sin\theta} \frac{\partial}{\partial \theta} \left( \sin\theta \frac{\partial \Theta}{\partial \theta} \right) + \left[ l(l+1) - \frac{\lambda}{\sin^2\theta} \right] \Theta = 0
+$$  
+令 $x = \cos\theta$，利用 $\frac{1}{\sin\theta} \frac{\partial}{\partial \theta} = -\frac{\partial}{\partial x}$ 及 $\sin^2\theta = 1 - x^2$，化简为：  
+$$
+\frac{\partial}{\partial x} \left( (1 - x^2) \frac{\partial \Theta}{\partial x} \right) + \left[ l(l+1) - \frac{m^2}{1 - x^2} \right] \Theta = 0 \quad (\text{其中 } \lambda = m^2)
+$$  
+此即 $l$ 阶连带勒让德方程。当 $m = 0$ 时退化为 $l$ 阶勒让德方程：  
+$$
+(1 - x^2) \frac{\partial^2 \Theta}{\partial x^2} - 2x \frac{\partial \Theta}{\partial x} + l(l+1) \Theta = 0
+$$  
 
-我们从角向方程出发，假设：
-$$
-Y(\theta, \varphi) = \Theta(\theta)\Phi(\varphi)
-$$
-代入前页得到的角向方程：
-$$
-\frac{1}{\sin\theta} \partial_\theta (\sin\theta \partial_\theta Y) + \frac{1}{\sin^2\theta} \partial_\varphi^2 Y + l(l+1) Y = 0
-$$
-代入分离形式后得：
-$$
-\Phi \cdot \frac{1}{\sin\theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + \Theta \cdot \frac{1}{\sin^2\theta} \partial_\varphi^2 \Phi + \Theta \Phi l(l+1) = 0
-$$
+## Figure Description  
+手写于浅色方格纸的数学推导，内容垂直排列。顶部为角度部分分离变量 $\widetilde{Y} = \Theta \Phi$，中部为 $\theta$ 方向方程的推导过程（含常数 $\lambda$ 的设定及变量代换 $x = \cos\theta$），底部为连带勒让德方程及其 $m=0$ 特例。所有公式为黑色墨水手写体，第四行公式右侧有红色手写标注“三入”（意指“设为常数 $\lambda$”），背景为均匀浅色网格线；字迹工整，公式结构清晰，与 Slide 1–2 的推导风格一致。
 
-两边同除以 $ \Theta \Phi $ 并整理：
-$$
-\frac{1}{\Theta} \cdot \frac{1}{\sin\theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + \frac{1}{\Phi} \cdot \frac{1}{\sin^2\theta} \partial_\varphi^2 \Phi + l(l+1) = 0
-$$
-
-乘以 $ \sin^2\theta $ 得：
-$$
-\frac{\sin\theta}{\Theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + \frac{1}{\Phi} \partial_\varphi^2 \Phi + l(l+1) \sin^2\theta = 0
-$$
-
-移项分离变量：
-$$
-\frac{\sin\theta}{\Theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + l(l+1) \sin^2\theta = -\frac{1}{\Phi} \partial_\varphi^2 \Phi
-$$
-
-由于左边仅依赖 $ \theta $，右边仅依赖 $ \varphi $，故二者等于同一常数。令该常数为 $ \lambda $，即：
-$$
--\frac{1}{\Phi} \frac{d^2\Phi}{d\varphi^2} = \lambda \quad \Rightarrow \quad \frac{d^2\Phi}{d\varphi^2} + \lambda \Phi = 0
-$$
-
-同时，极角部分满足：
-$$
-\sin\theta \partial_\theta (\sin\theta \partial_\theta \Theta) + \left[ l(l+1) \sin^2\theta - \lambda \right] \Theta = 0
-$$
-
-两边除以 $ \sin^2\theta $ 得标准形式：
-$$
-\frac{1}{\sin\theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + \left[ l(l+1) - \frac{\lambda}{\sin^2\theta} \right] \Theta = 0
-$$
-
-引入变量替换 $ x = \cos\theta $，则有：
-$$
-\frac{d}{d\theta} = \frac{dx}{d\theta} \frac{d}{dx} = -\sin\theta \frac{d}{dx}, \quad \text{故} \quad \partial_\theta = -\sin\theta \partial_x
-$$
-
-计算：
-$$
-\sin\theta \partial_\theta = \sin\theta (-\sin\theta \partial_x) = -\sin^2\theta \partial_x
-$$
-于是：
-$$
-\partial_\theta (\sin\theta \partial_\theta \Theta) = \partial_\theta ( -\sin^2\theta \partial_x \Theta ) = (-\sin\theta \partial_x)( -\sin^2\theta \partial_x \Theta ) = \sin\theta \partial_x (\sin^2\theta \partial_x \Theta)
-$$
-
-因此：
-$$
-\frac{1}{\sin\theta} \partial_\theta (\sin\theta \partial_\theta \Theta) = \partial_x (\sin^2\theta \partial_x \Theta) = \partial_x \left( (1 - x^2) \frac{d\Theta}{dx} \right)
-$$
-
-代入方程得：
-$$
-\frac{d}{dx} \left( (1 - x^2) \frac{d\Theta}{dx} \right) + \left[ l(l+1) - \frac{\lambda}{1 - x^2} \right] \Theta = 0
-$$
-
-由周期性边界条件 $ \Phi(\varphi + 2\pi) = \Phi(\varphi) $，解 $ \frac{d^2\Phi}{d\varphi^2} + \lambda \Phi = 0 $ 要求 $ \lambda = m^2 $，其中 $ m \in \mathbb{Z} $。代入 $ \lambda = m^2 $，得：
-
-$$
-\frac{d}{dx} \left( (1 - x^2) \frac{d\Theta}{dx} \right) + \left[ l(l+1) - \frac{m^2}{1 - x^2} \right] \Theta = 0
-$$
-
-此即 **$ l $ 阶连带勒让德方程**（Associated Legendre Equation）。当 $ m = 0 $ 时退化为：
-
-$$
-\frac{d}{dx} \left( (1 - x^2) \frac{d\Theta}{dx} \right) + l(l+1) \Theta = 0
-$$
-
-展开为：
-$$
-(1 - x^2) \frac{d^2\Theta}{dx^2} - 2x \frac{d\Theta}{dx} + l(l+1) \Theta = 0
-$$
-
-此即 **$ l $ 阶勒让德方程**（Legendre's Equation）。
-
-## Figure Description
-
-图像为方格纸背景的手写推导内容，使用黑色墨水书写，包含多行数学公式与少量中文注释。推导流程自上而下：从 $ Y(\theta,\varphi) = \Theta(\theta)\Phi(\varphi) $ 开始，逐步分离变量，推导至连带勒让德方程。第四行公式后有红色手写标注“三入”，可能意为“三项合并”或“代入三次”，结合上下文推测为强调分离变量的关键步骤。整体书写清晰，逻辑连贯，重点突出变量替换 $ x = \cos\theta $ 的链式微分过程。
+> [!WARNING] 🛡️ 原文勘误  
+> - **原文**: "$\frac{\sin\theta}{\Theta} \partial_\theta (\sin\theta \partial_\theta \Theta) + l(l+1) \sin^2\theta = -\frac{1}{\Phi} \partial_\varphi^2 \Phi$ 三入"  
+> - **疑点**: "三入"为手写标注，但符号 $\partial_\theta$/$\partial_\varphi$ 与 Slide 1–2 的 $\frac{\partial}{\partial \theta}$/$\frac{\partial}{\partial \varphi}$ 不一致；且"三入"语义模糊（应为"设为常数 $\lambda$"）。  
+> - **修正**: 统一使用 $\frac{\partial}{\partial \theta}$/$\frac{\partial}{\partial \varphi}$ 符号；将"三入"明确表述为"设等式两侧等于常数 $\lambda$"，确保符号规范性与逻辑连贯性。  
+>   
+> - **原文**: "$\partial_x ((1-x^2) \partial_x \Theta) + \left[l(l+1) - \frac{m^2}{\sin^2\theta}\right] \Theta = 0$"  
+> - **疑点**: $\frac{m^2}{\sin^2\theta}$ 未转换为 $x$ 变量（应为 $\frac{m^2}{1-x^2}$），与后文勒让德方程形式矛盾。  
+> - **修正**: 依据 $\sin^2\theta = 1 - x^2$，将 $\frac{m^2}{\sin^2\theta}$ 修正为 $\frac{m^2}{1-x^2}$，保持方程在 $x$ 坐标系下的严格一致性。  
 
 <CTX>
-{
-  "topic": "角向方程的完全分离与连带勒让德方程",
-  "keywords": ["连带勒让德方程", "勒让德方程", "变量分离", "周期性边界条件", "方位角方程"],
-  "summary": "本页完成了拉普拉斯方程角向部分的完全分离，得到方位角方程和极角方向的连带勒让德方程；通过变量替换 $ x = \\cos\\theta $ 将其化为标准形式，并指出当 $ m=0 $ 时退化为勒让德方程。",
-  "last_formula_context": "最后一个公式是 $ l $ 阶勒让德方程的标准形式，将在下一页用于讨论其多项式解与正交性。"
-}
+{ "summary": "完成球坐标系下拉普拉斯方程角度部分的分离变量，推导出连带勒让德方程及其特例", "keywords": ["分离变量法", "连带勒让德方程", "角度部分", "球坐标系", "常数λ"] }
 </CTX>
