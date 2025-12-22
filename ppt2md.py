@@ -30,28 +30,32 @@ from dashscope import Generation, MultiModalConversation
 
 # ================= 配置区域 =================
 
-# 视觉模型：负责 OCR 和 读图 (Step 1)
-MODEL_VISION = "qwen3-vl-plus"
+# 视觉模型：负责 OCR 和 读图 (Step 1) - 使用 Qwen3-VL-Plus
+MODEL_VISION = "qwen3-vl-plus" # 或者是 "qwen-vl-max" / "qwen2.5-vl-7b-instruct"
 
 # 文本模型：负责 逻辑重组、滑动窗口分析、原文勘误 (Step 2)
 MODEL_BRAIN = "qwen-plus"
 
-INPUT_FOLDER = "./ppt_images"       
+INPUT_FOLDER = "./ppt_images"        
 OUTPUT_FOLDER = "./markdown_output" 
 LOG_FOLDER = "./log"
 
 # 全局并发控制 (同时处理多少个 PPT 文件夹)
 MAX_PPT_WORKERS = 5
 
-# 【关键参数】单任务内部并发数 (Step 1 视觉提取的并发度)
-VISION_BATCH_WORKERS = 15  # 建议保持在 5 以避免 SSL 握手失败
+# 【关键参数 1】Step 1 视觉提取并发数 (建议 5-15)
+VISION_BATCH_WORKERS = 20  
+
+# 【关键参数 2】Step 2 逻辑重组并发数 (解耦后可火力全开，建议 10-20)
+#  警告：设置过高可能会触发 API Rate Limit (429 Too Many Requests)
+BRAIN_BATCH_WORKERS = 50 
 
 # 思考预算 (Token)
-THINKING_BUDGET_VISION = 1024 
+THINKING_BUDGET_VISION = 2048 
 THINKING_BUDGET_BRAIN = 2048 
 
 # === 命令行参数解析 ===
-parser = argparse.ArgumentParser(description="PPT2MD-V9.3 (5-Page Sliding Window)")
+parser = argparse.ArgumentParser(description="PPT2MD-V10 (Parallel Brain & Stream Fixed)")
 parser.add_argument("-n", "--name", type=str, default="default", help="任务会话名称")
 parser.add_argument("-o", "--output", type=str, default="./markdown_output", help="输出目录路径")
 args = parser.parse_args()
@@ -61,72 +65,83 @@ CURRENT_SESSION_NAME = args.name
 OUTPUT_FOLDER = str(Path(args.output).resolve())
 INPUT_FOLDER_ABS = str(Path(INPUT_FOLDER).resolve())
 
-# ================= Prompt 模板 (5页窗口 + 深度思考) =================
+# ================= Prompt 模板 (并行版) =================
 
-# --- 阶段一：视觉提取 Prompt ---
+# --- 阶段一：视觉提取 Prompt (TikZ-Ready) ---
 PROMPT_STAGE_1_VISION = r"""
 任务：请对这张 PPT 图片进行详尽的视觉提取。
 
 【思考要求】
-在输出结果前，请先观察图片的整体结构、公式的角标逻辑以及图表的数据趋势。
+1. **Figure 价值判断**：首先扫视全图，判断是否存在**具有信息量的 Figure**（如架构图、流程图、物理模型图、函数曲线、分子结构等）。
+   - **忽略**：页码、纯装饰性背景线条、无意义的库存图片、简单的排版框。
+   - **关注**：任何承载知识逻辑的图示。
+2. **TikZ 预备分析**：对于有价值的 Figure，请在脑海中解构其几何拓扑（节点形状、位置关系、箭头流向）。
 
 【提取要求】
 1. **OCR 识别**：逐字提取文本，保留原始换行结构。
-2. **公式识别**：看到数学/物理公式，必须转换为 LaTeX 格式。
-   - 区分 $v$ (速度) 和 $\nu$ (频率)。
-   - 区分 $P$ (功率) 和 $\rho$ (密度)。
-3. **视觉描述**：详细描述图表内容、数据关系、流程图逻辑。
+2. **公式识别**：所有数学/物理公式转换为 LaTeX 格式。
+3. **[重要] Figure 深度描述**：
+   - 如果发现有价值的 Figure，请单独输出一个 `### Figure Analysis` 区块。
+   - **描述粒度**：请用自然语言详细描述，以便我稍后能根据你的描述画出 TikZ 代码。
+   - **包含要素**：
+     * **布局**：例如“左侧是A，右侧是B”，“呈环形分布”，“分层结构”。
+     * **节点**：形状（圆/矩形/菱形）、颜色、包含的文字。
+     * **连接**：箭头方向（A指向B）、线型（实线/虚线）、连线上的标签。
+   - 如果图片仅为纯文本或无意义装饰，则**不要**输出此区块。
 
-请直接输出提取到的内容，**不需要**整理成 Markdown 格式。
+请直接输出提取到的内容，保持原意，**不需要**整理成 Markdown 格式。
 """
 
-# --- 阶段二：逻辑重组 Prompt (集成 5 页滑动窗口) ---
+# --- 阶段二：逻辑重组 Prompt (并行化 - 基于 Raw Data 窗口) ---
+# [修改注]：输入源已从 prev_md 改为 prev_raw，并增加了符号一致性强指令。
 PROMPT_STAGE_2_BRAIN = r"""
-你是一个具备深度批判性思维的学术助教。请利用提供的“五页滑动窗口”信息，将 PPT 重组为 Markdown。
+你是一个专业的编辑，你的责任是将图书内容纠错，并且尽量还原作者的原义，不要瞎编乱造，尽量遵守作者的原意，尽量还原作者的意图。请利用提供的“五页 Raw Data 滑动窗口”信息，将 PPT 重组为 Markdown。
 
-【五页滑动窗口信息】
+【五页滑动窗口信息 (全 Raw Data)】
 --------------------------------------------------
-[P-2] 前前页 (Markdown 成品 - 用于定义锚定):
-{prev_2_md}
+[P-2] 前前页 (Raw OCR Data):
+{prev_2_raw}
 --------------------------------------------------
-[P-1] 前一页 (Markdown 成品 - 用于直接语境):
-{prev_1_md}
+[P-1] 前一页 (Raw OCR Data):
+{prev_1_raw}
 --------------------------------------------------
-[Target] **当前页 (Raw OCR Data - 处理对象)**:
+[Target] **当前页 (Raw OCR Data - 包含详细的 Figure 描述)**:
 {target_raw}
 --------------------------------------------------
-[N+1] 后一页 (Raw OCR Data - 用于断句预判):
+[N+1] 后一页 (Raw OCR Data):
 {next_1_raw}
 --------------------------------------------------
-[N+2] 后两页 (Raw OCR Data - 用于逻辑走向):
+[N+2] 后两页 (Raw OCR Data):
 {next_2_raw}
 --------------------------------------------------
 
 【任务流程】
 请在后台进行深度思考 (Chain of Thought)：
-1. **跨页逻辑分析**：
-   - 查看 [P-1] 的结尾是否句子未完？如果是，[Target] 开头应紧密衔接。
-   - 查看 [Target] 结尾是否句子未完？结合 [N+1] 预判是否需要添加连接符。
-2. **符号一致性**：检查 [P-2] 和 [P-1] 中定义的符号，确保当前页使用相同的 LaTeX 表达。
-3. **原文勘误 (Fact-Check)**：检查 [Target] 原文是否存在笔误或事实错误（非OCR错误，而是PPT作者写错的）。
+1. **逻辑衔接**：即便前两页是 Raw Data，也请分析其语义流向，确保[Target]的正文与前文逻辑连贯，但是要尽量还原尽量还原作者的原义。
+2. **符号一致性 (Crucial)**：
+   - **强指令**：请仔细对比前后页 Raw Data 中的公式上下文。如果发现 [P-1] 中使用了特定符号（如 $v$ 表示速度），而 [Target] 中识别不够准确（如识别为 $\nu$），请智能推断并统一为最佳 LaTeX 符号定义。
+   - 必须使用 LaTeX 格式：行内公式 $...$，行间公式 $$...$$，你不能使用\[和\]，你的行间公式必须用$$123$$。
+3. **Figure 整合**：检查 [Target] 中是否有 `### Figure Analysis` 区块。
+   - 如果有，请在 Markdown 中将其整理为 `> [!NOTE] 🖼️ Figure 描述` 引用块。
 
 【输出要求】
-输出当前页的 Markdown，只能包含以下结构：（注意不要把思考内容放进来了！）
+输出当前页的 Markdown，结构如下：
 
 1. **正文**：
    - 标题：# Slide {slide_no}
    - 内容：修正后的流畅文本和 LaTeX 公式。
-   - 视觉描述：放在 `## Figure Description`。
+   - **图像描述**（如果有）：
+     > [!NOTE] 🖼️ Figure 描述
+     > (在此处放入整理后的图像几何描述，方便后续 TikZ 绘图)
 
-2. **原文勘误 (仅在发现原文错误时生成)**：
+2. **原文勘误** (可选)：
+   - 如果发现 OCR 明显的错别字或逻辑矛盾，请修正并在下方标注：
    > [!WARNING] 🛡️ 原文勘误
-   > - **原文**: ...
-   > - **疑点**: ...
-   > - **修正**: ...
+   > ...
 
-3. **Context Anchor (用于传递给下一轮)**：
+3. **Context Anchor**：
    <CTX>
-   {{ "summary": "本页摘要", "keywords": ["..."] }}
+   {{ "summary": "本页核心摘要...", "keywords": ["关键词1", "关键词2"] }}
    </CTX>
 """
 
@@ -193,7 +208,7 @@ def merge_markdowns(ppt_output_dir, ppt_name):
     md_files = sorted(p.glob("Slide_*.md"), key=natural_sort_key)
     if not md_files: return
     with open(final_path, 'w', encoding='utf-8') as outfile:
-        outfile.write(f"# {ppt_name} 汇总笔记\n\n> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n> 引擎: V9.3 (5-Page Window + Thinking)\n\n")
+        outfile.write(f"# {ppt_name} 汇总笔记\n\n> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n> 引擎: V10 (Parallel Brain)\n\n")
         for md_file in md_files:
             with open(md_file, 'r', encoding='utf-8') as infile:
                 outfile.write(infile.read())
@@ -279,30 +294,76 @@ def interactive_setup(console, api_key):
 
 def run_stage_1_vision(img_path, slide_no, ppt_name, msg_queue):
     """
-    Step 1 Worker: 调用 VL 模型提取 Raw Data
+    Step 1 Worker: 调用 VL 模型提取 Raw Data (流式版)
     """
     max_retries = 3
     for attempt in range(max_retries):
         try:
             messages = [{"role": "user", "content": [{"image": f"file://{img_path}"}, {"text": PROMPT_STAGE_1_VISION}]}]
-            response = MultiModalConversation.call(
+            
+            responses = MultiModalConversation.call(
                 model=MODEL_VISION,
                 messages=messages,
-                enable_thinking=True,              # <--- 开启思考
-                thinking_budget=THINKING_BUDGET_VISION
+                enable_thinking=True,              
+                thinking_budget=THINKING_BUDGET_VISION,
+                stream=True,                       
+                incremental_output=True            
             )
             
-            if response.status_code == 200:
-                content = response.output.choices[0].message.content
-                if isinstance(content, list):
-                    text_content = "".join([c['text'] for c in content if 'text' in c])
+            full_content = ""
+            full_reasoning = ""
+            
+            for chunk in responses:
+                if chunk.status_code == 200:
+                    try:
+                        if not hasattr(chunk.output, 'choices') or not chunk.output.choices:
+                            continue
+                            
+                        message = chunk.output.choices[0].message
+                        
+                        r_content = None
+                        if hasattr(message, 'get'):
+                            r_content = message.get('reasoning_content')
+                        else:
+                            try:
+                                r_content = message.reasoning_content
+                            except (AttributeError, KeyError):
+                                r_content = None
+                        
+                        if r_content:
+                            full_reasoning += r_content
+                        
+                        c_content = None
+                        if hasattr(message, 'get'):
+                            c_content = message.get('content')
+                        else:
+                            try:
+                                c_content = message.content
+                            except (AttributeError, KeyError):
+                                c_content = None
+
+                        if c_content:
+                            if isinstance(c_content, list):
+                                for item in c_content:
+                                    if isinstance(item, dict) and 'text' in item:
+                                        full_content += item['text']
+                            elif isinstance(c_content, str):
+                                full_content += c_content
+                                
+                    except Exception as parse_err:
+                        continue
+                            
                 else:
-                    text_content = content
-                
-                return {"success": True, "slide_no": slide_no, "raw_text": text_content}
-            else:
-                if "AccessDenied" in str(response.code): raise RuntimeError("AccessDenied")
-                raise Exception(f"API Code {response.code}")
+                    if "AccessDenied" in str(chunk.code): raise RuntimeError("AccessDenied")
+                    return {"success": False, "slide_no": slide_no, "error": f"Stream Error: {chunk.code}"}
+
+            if not full_content:
+                if full_reasoning:
+                    return {"success": True, "slide_no": slide_no, "raw_text": f"[Model only returned reasoning]\n\nReasoning Trace:\n{full_reasoning[:500]}..."}
+                else:
+                    return {"success": False, "slide_no": slide_no, "error": "Empty response (Stream failed)."}
+            
+            return {"success": True, "slide_no": slide_no, "raw_text": full_content}
                 
         except Exception as e:
             if "AccessDenied" in str(e): raise e
@@ -310,40 +371,32 @@ def run_stage_1_vision(img_path, slide_no, ppt_name, msg_queue):
                 return {"success": False, "slide_no": slide_no, "error": f"重试失败: {str(e)}"}
             time.sleep((attempt + 1) * 2)
 
-# ================= 阶段二：大脑 (5页滑动窗口逻辑) =================
+# ================= 阶段二：大脑 (并行版 - 全 Raw Data 窗口) =================
 
 def get_raw_content(raw_data_map, slide_no):
     """安全获取 Raw Data，处理越界"""
-    return raw_data_map.get(slide_no, "(No Data / Out of Range)")
+    # 截断过长的 Raw Data 以节省 token
+    content = raw_data_map.get(slide_no, "(No Data / Out of Range)")
+    if len(content) > 3000:
+        return content[:3000] + "...(truncated)"
+    return content
 
-def get_md_content(ppt_root, slide_no):
-    """安全获取已生成的 MD 文件，处理越界"""
-    p = ppt_root / f"Slide_{slide_no:02d}.md"
-    if p.exists():
-        try:
-            with open(p, 'r', encoding='utf-8') as f: 
-                content = f.read()
-                # 截取前 2000 字防止 Token 溢出，通常足够覆盖上下文
-                return content[:2500] 
-        except: return "(File Read Error)"
-    return "(Start of Document / No Previous Slide)"
-
-def run_stage_2_brain_5window(slide_no, ppt_root, raw_data_map):
+def run_stage_2_brain_parallel(slide_no, ppt_root, raw_data_map):
     """
-    Step 2 Worker: 组装 5 页数据 -> 调用 Brain
-    此函数实现了真正的 P-2, P-1, Target, N+1, N+2 注入
+    Step 2 Worker: 组装 5 页 Raw Data -> 调用 Brain (流式版)
+    [重要变更]：输入全部来自 raw_data_map，不读取磁盘 MD，从而允许完全并行。
     """
-    # 1. 准备 5 页数据
-    prev_2_md = get_md_content(ppt_root, slide_no - 2)
-    prev_1_md = get_md_content(ppt_root, slide_no - 1)
+    # 1. 准备 5 页数据 (全 Raw)
+    prev_2_raw = get_raw_content(raw_data_map, slide_no - 2)
+    prev_1_raw = get_raw_content(raw_data_map, slide_no - 1)
     target_raw = get_raw_content(raw_data_map, slide_no)
     next_1_raw = get_raw_content(raw_data_map, slide_no + 1)
     next_2_raw = get_raw_content(raw_data_map, slide_no + 2)
 
-    # 2. 填充 Prompt
+    # 2. 填充 Prompt (使用新版 Prompt)
     filled_prompt = PROMPT_STAGE_2_BRAIN.format(
-        prev_2_md=prev_2_md,
-        prev_1_md=prev_1_md,
+        prev_2_raw=prev_2_raw,
+        prev_1_raw=prev_1_raw,
         target_raw=target_raw,
         next_1_raw=next_1_raw,
         next_2_raw=next_2_raw,
@@ -351,17 +404,38 @@ def run_stage_2_brain_5window(slide_no, ppt_root, raw_data_map):
     )
 
     try:
-        response = Generation.call(
+        responses = Generation.call(
             model=MODEL_BRAIN,
             messages=[{'role': 'user', 'content': filled_prompt}],
             result_format='message',
-            enable_thinking=True,              # <--- 开启思考
-            thinking_budget=THINKING_BUDGET_BRAIN
+            enable_thinking=True,              
+            thinking_budget=THINKING_BUDGET_BRAIN,
+            stream=True,                       
+            incremental_output=True            
         )
-        if response.status_code == 200:
-            return response.output.choices[0].message.content
-        else:
-            return f"Brain Error: {response.code} - {response.message}"
+        
+        full_reasoning = ""
+        full_content = ""
+        
+        for chunk in responses:
+            if chunk.status_code == 200:
+                choice = chunk.output.choices[0]
+                
+                # 1. 收集思考过程
+                if hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
+                    full_reasoning += choice.message.reasoning_content
+                
+                # 2. 收集正文回答
+                if hasattr(choice.message, 'content') and choice.message.content:
+                    full_content += choice.message.content
+            else:
+                 return f"Brain Error: {chunk.code} - {chunk.message}"
+        
+        if not full_content:
+             return f"Error: Model generated thinking but no content. Trace: {full_reasoning[:100]}..."
+            
+        return full_content
+
     except Exception as e:
         return f"Brain Exception: {str(e)}"
 
@@ -369,7 +443,7 @@ def run_stage_2_brain_5window(slide_no, ppt_root, raw_data_map):
 
 def process_single_ppt_task(ppt_name, config, msg_queue):
     """
-    双阶段流水线控制器
+    双阶段流水线控制器 (V10 并行增强版)
     """
     task_key = config.get("api_key")
     if task_key: dashscope.api_key = task_key
@@ -380,7 +454,6 @@ def process_single_ppt_task(ppt_name, config, msg_queue):
     end_idx = config["range_end"]
     task_id = config["task_id"]
     
-    # 修正范围，获取实际要处理的图片列表
     target_images = images_paths[start_idx:end_idx]
     total_slides = len(target_images)
     
@@ -389,16 +462,15 @@ def process_single_ppt_task(ppt_name, config, msg_queue):
     os.makedirs(ppt_root, exist_ok=True)
     os.makedirs(temp_dir, exist_ok=True)
     
-    msg_queue.put(("log", f"[{ppt_name}] 任务启动。V9.3 5页窗口引擎已激活。"))
-    msg_queue.put(("init_task", task_id, total_slides))
+    msg_queue.put(("log", f"[{ppt_name}] 任务启动。V10 并行版引擎 (Vision:{VISION_BATCH_WORKERS} / Brain:{BRAIN_BATCH_WORKERS}) 已激活。"))
+    msg_queue.put(("init_task", task_id, total_slides * 2)) # 进度条总数 * 2 (Step 1 + Step 2)
 
     # === Step 1: 暴力并发视觉提取 ===
-    msg_queue.put(("status", task_id, f"[cyan]Step 1: 视觉提取 (并发{VISION_BATCH_WORKERS})..."))
+    msg_queue.put(("status", task_id, f"[cyan]Step 1: 视觉提取 (并发 {VISION_BATCH_WORKERS})..."))
     
     vision_futures = {}
     raw_data_map = {} 
     
-    # 使用 ThreadPoolExecutor 并发处理图片
     with ThreadPoolExecutor(max_workers=VISION_BATCH_WORKERS) as executor:
         for i, img_path in enumerate(target_images):
             actual_slide_no = start_idx + i + 1
@@ -411,6 +483,7 @@ def process_single_ppt_task(ppt_name, config, msg_queue):
                         data = json.load(f)
                         raw_data_map[actual_slide_no] = data['raw_text']
                         msg_queue.put(("log", f"[{ppt_name}] P{actual_slide_no} 视觉缓存命中"))
+                        msg_queue.put(("advance", task_id, 1)) # 缓存命中也推进度
                         continue 
                 except: pass
 
@@ -418,7 +491,6 @@ def process_single_ppt_task(ppt_name, config, msg_queue):
             vision_futures[future] = actual_slide_no
 
         # 等待所有视觉任务完成
-        # 注意：为了 Step 2 的 N+1/N+2 预判，必须等待大部分/全部视觉任务完成
         for future in as_completed(vision_futures):
             s_no = vision_futures[future]
             try:
@@ -438,31 +510,47 @@ def process_single_ppt_task(ppt_name, config, msg_queue):
                 raise e
             except Exception as e:
                 msg_queue.put(("log", f"[{ppt_name}] P{s_no} 异常: {e}"))
+            finally:
+                msg_queue.put(("advance", task_id, 1))
 
-    msg_queue.put(("log", f"[{ppt_name}] Step 1 视觉完成。开始 Step 2 滑动窗口逻辑重组..."))
+    msg_queue.put(("log", f"[{ppt_name}] Step 1 视觉完成。开始 Step 2 并行逻辑重组..."))
 
-    # === Step 2: 串行逻辑重组 (Brain + 5-Page Window) ===
-    # 必须串行，因为要按顺序生成 Markdown 供下一页读取 [P-1]
+    # === Step 2: 并行逻辑重组 (Brain + 5-Page Raw Window) ===
+    # [修改点]：这里不再是串行 for 循环，而是使用 ThreadPoolExecutor 进行并行
     
-    for i in range(total_slides):
-        actual_slide_no = start_idx + i + 1
-        output_path = ppt_root / f"Slide_{actual_slide_no:02d}.md"
-        
-        msg_queue.put(("status", task_id, f"[green]Step 2: 深度思考 P{actual_slide_no}..."))
-        
-        # 断点检测
-        if output_path.exists() and output_path.stat().st_size > 100:
-            msg_queue.put(("advance", task_id, 1))
-            continue
+    msg_queue.put(("status", task_id, f"[green]Step 2: 并行思考 (并发 {BRAIN_BATCH_WORKERS})..."))
+    
+    brain_futures = {}
+    
+    with ThreadPoolExecutor(max_workers=BRAIN_BATCH_WORKERS) as executor:
+        for i in range(total_slides):
+            actual_slide_no = start_idx + i + 1
+            output_path = ppt_root / f"Slide_{actual_slide_no:02d}.md"
+            
+            # 断点检测
+            if output_path.exists() and output_path.stat().st_size > 100:
+                msg_queue.put(("advance", task_id, 1))
+                continue
 
-        # 调用核心函数 (包含 5 页数据注入)
-        final_markdown = run_stage_2_brain_5window(actual_slide_no, ppt_root, raw_data_map)
-        
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(final_markdown)
-        
-        msg_queue.put(("log", f"[{ppt_name}] P{actual_slide_no} 完成"))
-        msg_queue.put(("advance", task_id, 1))
+            # 提交任务到线程池
+            # 注意：raw_data_map 在此时已经由 Step 1 完全填充完毕，可以安全地并发读取
+            future = executor.submit(run_stage_2_brain_parallel, actual_slide_no, ppt_root, raw_data_map)
+            brain_futures[future] = (actual_slide_no, output_path)
+
+        # 等待 Step 2 任务完成
+        for future in as_completed(brain_futures):
+            s_no, out_path = brain_futures[future]
+            try:
+                final_markdown = future.result()
+                
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(final_markdown)
+                
+                msg_queue.put(("log", f"[{ppt_name}] P{s_no} 重组完成"))
+            except Exception as e:
+                msg_queue.put(("log", f"[{ppt_name}] P{s_no} 重组异常: {e}"))
+            finally:
+                 msg_queue.put(("advance", task_id, 1))
 
     msg_queue.put(("status", task_id, "正在合并..."))
     merge_markdowns(ppt_root, ppt_name)
@@ -478,11 +566,11 @@ def main():
         return
 
     logger, log_file_path = setup_logger(CURRENT_SESSION_NAME)
-    console.print(Panel(f"""[bold]V9.3 终极版 (5-Page Window + Deep Thinking)[/]
+    console.print(Panel(f"""[bold]V10 终极版 (Parallel Brain / Raw Context)[/]
     会话: [magenta]{CURRENT_SESSION_NAME}[/] | API Key: {final_key[:8]}...
     -------------------------------------------------------
-    Step 1 引擎: [cyan]{MODEL_VISION}[/] (并发读取 Raw Data)
-    Step 2 引擎: [green]{MODEL_BRAIN}[/] (5页滑动窗口 + 勘误)
+    Step 1 引擎: [cyan]{MODEL_VISION}[/] (并发: {VISION_BATCH_WORKERS})
+    Step 2 引擎: [green]{MODEL_BRAIN}[/] (并发: {BRAIN_BATCH_WORKERS})
     -------------------------------------------------------
     输出: {OUTPUT_FOLDER}
     日志: {log_file_path}
