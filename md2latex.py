@@ -249,7 +249,8 @@ SYSTEM_PROMPT_TEMPLATE = r"""
 1. **显式标题转换**：
    - Markdown `#` (一级标题) -> LaTeX `\section{...}`
    - Markdown `##` (二级标题) -> LaTeX `\subsection{...}`
-   - Markdown `###` (三级标题) -> LaTeX `\subsubsection{...}`
+    - Markdown `###` (三级标题) -> LaTeX `\subsubsection{...}`
+    - 若原 Markdown 中存在 `# Slide N` 之类的占位标题，请将其视作位置标记，转换为注释或忽略，优先遵循架构师指令给出的章节层级。
 2. **隐式结构补全 (自动总结)**：
    - 绝大多数情况下，原 MD 缺少标题。你**必须**根据【本章全局目录】和内容语义，主动构建文档层级。
    - **分层策略 (Sectioning Strategy - 极其重要)**：
@@ -259,8 +260,8 @@ SYSTEM_PROMPT_TEMPLATE = r"""
        - `\section{...}`: 主要话题 (e.g. "协变导数的定义")
        - `\subsection{...}`: 子话题 (e.g. "标量场的协变导数")
        - `\subsubsection{...}`: 具体细节/推导步骤
-     - **禁止**生成长篇大论而没有任何 `\subsection` 的正文。
-   - **不要**生成 `\chapter{...}`（当前文件本身即为一个 Chapter）。
+         - **禁止**生成长篇大论而没有任何 `\subsection` 的正文。
+     - 章节层级必须以架构师指令为最高优先级；如有冲突，以指令为准。
 3. **上下文连贯性**：
    - 利用【上文 Markdown】判断当前是否已经处于某个 Section/Subsection 中。
    - 如果当前内容是上文的延续，**不要**重复生成标题。
@@ -268,6 +269,70 @@ SYSTEM_PROMPT_TEMPLATE = r"""
 
 【输入数据】
 这里是当前需要处理的 Markdown 片段（Look-ahead 包含在末尾用于参考）：
+"""
+
+# ================= 外部导入标准 Prompt 模板 =================
+
+EXTERNAL_MAP_PROMPT_TEMPLATE = r"""
+# Role
+你是一位专业的学术教材主编。
+
+# Context
+我将上传一份课堂笔记的“页面摘要清单”（toc_source.txt），其中包含了每一页 PPT (Slide) 的编号、关键词和内容摘要。
+
+# Task
+请分析这份摘要流的逻辑连贯性，将其重构为一份结构严谨、层级清晰的 LaTeX 目录结构数据。
+
+# Requirements
+1. **聚合与归纳**：
+     - 不要为每一页都生成标题。
+     - 请识别连续讨论同一话题的多个 Slide（例如 Slide 5-10），将其合并为一个 `section`。
+     - 只有在话题发生显著转变时，才开启新的 `section`。
+     - 适当使用 `subsection` 来处理大章节下的细分话题。
+
+2. **完整性**：
+     - 你的结构必须覆盖从 Slide 1 到 Slide {last_slide} 的所有页面，不能遗漏。
+     - `start_slide` 和 `end_slide` 必须连续且不重叠。
+    - 在 meta 中填写 `total_slides`: {last_slide}。
+
+3. **Output Format (Strict JSON)**
+     请直接输出 JSON 代码，不要包含 Markdown 代码块标记（```json），格式如下：
+
+{
+    "meta": {
+        "mode": "chapter", 
+        "title": "请根据内容拟定一个总标题",
+        "total_slides": {last_slide}
+    },
+    "structure": [
+        {
+            "level": "section",
+            "title": "第一节的标题",
+            "start_slide": 1,
+            "end_slide": 10,
+            "subsections": [
+                 {
+                     "level": "subsection",
+                     "title": "子节标题",
+                     "start_slide": 1,
+                     "end_slide": 5
+                 },
+                 {
+                     "level": "subsection",
+                     "title": "子节标题",
+                     "start_slide": 6,
+                     "end_slide": 10
+                 }
+            ]
+        },
+        {
+            "level": "section",
+            "title": "第二节标题",
+            "start_slide": 11,
+            "end_slide": 20
+        }
+    ]
+}
 """
 
 # ================= 工具类 =================
@@ -626,8 +691,8 @@ class ContextManager:
                 
         return toc
 
-    def create_smart_chunks(self, full_text: str, slide_map: List[dict]) -> List[dict]:
-        """智能切分并构建带结构感知的任务"""
+    def create_smart_chunks(self, full_text: str, slide_map: List[dict], instruction_lookup: dict | None = None) -> List[dict]:
+        """智能切分并构建带结构感知的任务（查表逻辑优先）"""
         chunks = self._smart_split(full_text)
         tasks = []
         total = len(chunks)
@@ -670,7 +735,39 @@ class ContextManager:
                         prev_slide_info = slide_map[first_slide_idx - 1]
                 except: pass
             
-            structure_hint = self._generate_structure_hint(related_slides, prev_slide_info)
+            # 如果提供了查表指令，则根据第一个覆盖的 Slide 生成架构师指令
+            structure_hint = ""
+            map_directive: list[dict] = []
+            if instruction_lookup and related_slides:
+                # 若当前块覆盖多个 slide，优先选择其中最小编号且有指令的 slide
+                directive_slide = None
+                directive_list = None
+                for s in sorted(related_slides, key=lambda x: x['num']):
+                    maybe = instruction_lookup.get(s['num'])
+                    if maybe:
+                        directive_slide = s['num']
+                        directive_list = maybe
+                        break
+                if directive_list:
+                    # 附带 slide 编号，便于后续提示
+                    map_directive = [{ **d, 'slide': directive_slide } for d in directive_list]
+                    lines = ["【架构师指令】"]
+                    for d in directive_list:
+                        if d['type'] == 'START_SECTION':
+                            lines.append(
+                                f"- 当前是新章节《{d['title']}》的起始页（Slide {directive_slide}）。请在开头插入 \\section{{{d['title']}}}。"
+                            )
+                        elif d['type'] == 'START_SUBSECTION':
+                            lines.append(
+                                f"- 当前是子章节《{d['title']}》的起始页（Slide {directive_slide}），父章节《{d.get('parent','')}》。请在开头插入 \\subsection{{{d['title']}}}。"
+                            )
+                        elif d['type'] == 'NO_HEADER':
+                            lines.append(
+                                f"- 当前处于章节《{d.get('parent','')}》内部（Slide {directive_slide}）。请勿生成章节或子章节标题，只输出正文。"
+                            )
+                    structure_hint = "\n".join(lines)
+            if not structure_hint:
+                structure_hint = self._generate_structure_hint(related_slides, prev_slide_info)
 
             tasks.append({
                 "index": i,
@@ -679,7 +776,8 @@ class ContextManager:
                 "prev": prev_ctx,
                 "next": next_ctx,
                 "structure_hint": structure_hint,
-                "chapter_toc": global_toc
+                "chapter_toc": global_toc,
+                "map_directive": map_directive
             })
             current_char_ptr += chunk_len
             
@@ -818,6 +916,55 @@ class LatexGenerator:
         except Exception as e:
             raise e
 
+
+class MapGenerator:
+    """使用 LLM (默认 Qwen-Plus) 生成结构地图"""
+    def __init__(self, model_name="qwen-plus", api_key=None):
+        self.model = model_name
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        dashscope.api_key = self.api_key
+
+    def _build_prompt(self, toc_text: str, last_slide: int, mode: str, title: str = "") -> str:
+        tmpl = EXTERNAL_MAP_PROMPT_TEMPLATE.replace('{last_slide}', str(last_slide or '最后一页'))
+        extra = f"\n# Extra\n请确保 meta.mode = \"{mode}\"，meta.total_slides = {last_slide}，meta.title 可填写 \"{title}\"。"
+        return f"{tmpl}\n\n{toc_text}\n{extra}"
+
+    def _parse_json(self, text: str) -> dict:
+        """尝试解析 JSON，去除围栏并做简单修复"""
+        cleaned = text.strip()
+        cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'^```\s*', '', cleaned)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        # 截取最外层大括号
+        m = re.search(r'\{[\s\S]*\}$', cleaned)
+        if m:
+            cleaned = m.group(0)
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            # 简单补全引号类错误可在此扩展；当前失败则抛出
+            raise
+
+    def generate_structure(self, toc_text: str, last_slide: int, mode: str = "chapter", title: str = "") -> dict:
+        prompt = self._build_prompt(toc_text, last_slide, mode, title)
+        resp = Generation.call(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            result_format='message',
+            enable_thinking=False,
+            stream=False
+        )
+        if resp.status_code != 200:
+            raise Exception(f"MapGenerator API Error: {resp.code} - {resp.message}")
+        content = resp.output.choices[0].message.content if resp.output.choices else ""
+        data = self._parse_json(content)
+        # 补充或纠正 meta 信息
+        meta = data.setdefault('meta', {})
+        meta.setdefault('mode', mode)
+        meta.setdefault('total_slides', last_slide)
+        meta.setdefault('title', title or "")
+        return data
+
 # ================= 主控制器 =================
 
 class WorkflowController:
@@ -829,6 +976,8 @@ class WorkflowController:
         # 选择模型
         self.selected_model_config = self._select_model(model_arg)
         self.model_name = self.selected_model_config['id']
+        # 架构师模型（单独选择，默认 qwen-plus）
+        self.architect_model = 'qwen-plus'
         
         # 初始化限流器 (支持 TPM 约束)
         rpm = self.selected_model_config.get('rpm', 600)
@@ -838,6 +987,157 @@ class WorkflowController:
         self.console.print(f"[dim]⚡ 限流器已启动: Limit ~ {rpm} RPM / {tpm if tpm else 'Inf'} TPM[/]")
 
         self._setup_logger()
+
+        # 运行时范围模式：chapter/book
+        self.scope_mode = None
+        # 结构地图来源：internal/external
+        self.map_source = None
+
+    def _detect_scope_mode(self, tasks: dict) -> str:
+        """根据所选任务判断范围模式（单章/书籍）"""
+        # 如果选择了多个不同子目录，则认为是 book 模式
+        if len(tasks) > 1:
+            return 'book'
+        # 单个任务但路径包含子层级也可能是 book 的某章，此处统一为 chapter
+        return 'chapter'
+
+    def generate_toc_source_file(self, chap_name: str, md_files: List[Path], out_dir: Path) -> Path:
+        """遍历 Slide 提取 <CTX> summary/keywords，生成 toc_source.txt"""
+        lines, last_slide = self._collect_toc_source(md_files)
+
+        # 输出路径：输出目录/intermediates/chap_name/toc_source.txt
+        inter_dir = out_dir / 'intermediates' / chap_name
+        inter_dir.mkdir(parents=True, exist_ok=True)
+        toc_path = inter_dir / 'toc_source.txt'
+        toc_path.write_text("\n".join(lines), encoding='utf-8')
+
+        # 打印标准 Prompt 模板
+        tmpl = EXTERNAL_MAP_PROMPT_TEMPLATE.replace('{last_slide}', str(last_slide or '最后一页'))
+        self.console.print(Panel("[bold]外部导入 - 标准 Prompt 模板[/]", style="bold cyan"))
+        self.console.print(Markdown(tmpl))
+        self.console.print(f"\n已生成摘要源文件: [green]{toc_path}[/] \n请上传给外部模型并将生成的 JSON 保存为 structure_map.json 后重新运行。")
+        return toc_path
+
+    def _collect_toc_source(self, md_files: List[Path]) -> tuple[list[str], int]:
+        lines = []
+        last_slide = 0
+        for f in md_files:
+            try:
+                text = f.read_text(encoding='utf-8')
+            except Exception:
+                continue
+            ctx_match = re.search(r'<CTX>(.*?)</CTX>', text, flags=re.DOTALL)
+            ctx_info = {}
+            if ctx_match:
+                try:
+                    ctx_info = json.loads(ctx_match.group(1))
+                except Exception:
+                    ctx_info = {}
+            m = re.search(r'(?:^|\n)# Slide (\d+)', text)
+            slide_num = int(m.group(1)) if m else 999
+            last_slide = max(last_slide, slide_num)
+            keywords = ctx_info.get('keywords', [])
+            summary = ctx_info.get('summary', '').replace('\n', ' ').strip()
+            kw_str = ", ".join(keywords)
+            lines.append(f"Slide {slide_num}: [{kw_str}] {summary}")
+        return lines, last_slide
+
+    def _load_structure_map(self, chap_name: str, input_dir: Path, out_dir: Path) -> dict | None:
+        """尝试加载 structure_map.json（优先输出中间目录，其次输入章节目录）"""
+        candidates = [
+            out_dir / 'intermediates' / chap_name / 'structure_map.json',
+        ]
+        # 输入章节目录
+        in_chap_dir = Path(input_dir) / chap_name
+        candidates.append(in_chap_dir / 'structure_map.json')
+        for p in candidates:
+            if p.exists():
+                try:
+                    return json.loads(p.read_text(encoding='utf-8'))
+                except Exception:
+                    pass
+        return None
+
+    def _build_instruction_lookup(self, structure_map: dict) -> dict:
+        """将结构 JSON 转换为查表：slide_num -> 指令列表（按层级优先级排序）"""
+        if not structure_map:
+            return {}
+
+        lookup: dict[int, list] = {}
+        nodes = structure_map.get('structure', [])
+
+        def add_directive(slide_num: int, directive: dict, priority: int):
+            if slide_num not in lookup:
+                lookup[slide_num] = []
+            lookup[slide_num].append({ **directive, 'priority': priority })
+
+        for sec in nodes:
+            sec_title = sec.get('title', '')
+            s = int(sec.get('start_slide', 0))
+            e = int(sec.get('end_slide', 0))
+            if s:
+                add_directive(s, { 'type': 'START_SECTION', 'title': sec_title }, priority=1)
+            # 中间页标记 NO_HEADER（低优先级）
+            for num in range(s+1, e+1):
+                add_directive(num, { 'type': 'NO_HEADER', 'parent': sec_title }, priority=99)
+
+            for sub in sec.get('subsections', []) or []:
+                sub_title = sub.get('title', '')
+                ss = int(sub.get('start_slide', 0))
+                se = int(sub.get('end_slide', 0))
+                if ss:
+                    add_directive(ss, { 'type': 'START_SUBSECTION', 'title': sub_title, 'parent': sec_title }, priority=2)
+                for num in range(ss+1, se+1):
+                    add_directive(num, { 'type': 'NO_HEADER', 'parent': sec_title }, priority=99)
+
+        # 将每个 slide 的指令按 priority 排序
+        for k, v in lookup.items():
+            lookup[k] = sorted(v, key=lambda x: x.get('priority', 50))
+        return lookup
+
+    def _validate_structure_map(self, data: dict) -> None:
+        """校验外部/内部生成的 structure_map.json 合法性"""
+        if not isinstance(data, dict):
+            raise ValueError("structure_map 需为对象")
+        meta = data.get('meta', {})
+        mode = meta.get('mode')
+        if mode not in ('chapter', 'book'):
+            raise ValueError("meta.mode 必须是 'chapter' 或 'book'")
+        if 'title' not in meta:
+            raise ValueError("meta.title 缺失")
+
+        structure = data.get('structure')
+        if not isinstance(structure, list) or not structure:
+            raise ValueError("structure 必须是非空列表")
+
+        def _check_block(block, level_expected):
+            if block.get('level') != level_expected:
+                raise ValueError(f"{level_expected} 缺失或 level 非 {level_expected}")
+            if 'title' not in block:
+                raise ValueError(f"{level_expected} 缺少 title")
+            s = block.get('start_slide')
+            e = block.get('end_slide')
+            if not (isinstance(s, int) and isinstance(e, int) and 1 <= s <= e):
+                raise ValueError(f"{level_expected} 的 start/end 非法")
+
+        prev_end = 0
+        max_end = 0
+        for sec in structure:
+            _check_block(sec, 'section')
+            if sec['start_slide'] <= prev_end:
+                raise ValueError("section 的页码存在重叠或未递增")
+            prev_end = sec['end_slide']
+            max_end = max(max_end, sec['end_slide'])
+            for sub in sec.get('subsections', []) or []:
+                _check_block(sub, 'subsection')
+                if not (sec['start_slide'] <= sub['start_slide'] <= sub['end_slide'] <= sec['end_slide']):
+                    raise ValueError("subsection 的页码不在所属 section 范围内")
+                max_end = max(max_end, sub['end_slide'])
+
+        # 容错：若 total_slides 缺失或非法，则用最大 end_slide 回填
+        total_slides = meta.get('total_slides')
+        if not (isinstance(total_slides, int) and total_slides > 0):
+            meta['total_slides'] = max_end if max_end > 0 else 1
 
     def _select_model(self, model_arg):
         """交互式或参数式选择模型"""
@@ -921,8 +1221,62 @@ class WorkflowController:
         if not tasks:
             return
 
+        # 范围模式交互（自动/单章/书籍）
+        self.console.print(Panel("📚 请选择处理范围", style="bold blue"))
+        self.console.print("[1] 自动检测 (默认)\n[2] 单章模式 (chapter)\n[3] 书籍模式 (book)")
+        scope_choice = input("👉 请输入 1/2/3 (默认 1): ").strip()
+        if scope_choice == '2':
+            self.scope_mode = 'chapter'
+        elif scope_choice == '3':
+            self.scope_mode = 'book'
+        else:
+            self.scope_mode = self._detect_scope_mode(tasks)
+        self.console.print(f"[dim]Scope Mode: {self.scope_mode}[/]")
+
         # 2. 成本预估
         estimator.estimate(tasks)
+
+        # 3. 地图来源交互（优先确定是否外部导入）
+        self.console.print(Panel("🗺️ 请选择文档结构分析（架构师）的方式", style="bold blue"))
+        self.console.print("[1] 内部自动生成 (推荐)\n[2] 外部导入 (高级)")
+        map_choice = input("👉 请输入 1 或 2 (默认 1): ").strip()
+        self.map_source = 'internal' if (map_choice == '' or map_choice == '1') else 'external'
+
+        # 4. 架构师模型交互（仅在内部模式下询问，并允许自定义 ID）
+        if self.map_source == 'internal':
+            self.console.print(Panel("🤖 请选择架构师模型", style="bold blue"))
+            self.console.print("[1] qwen-plus (默认)\n[2] qwen3-max\n[3] 手动输入模型 ID")
+            arch_choice = input("👉 请输入 1/2/3 (默认 1): ").strip()
+            if arch_choice == '2':
+                self.architect_model = 'qwen3-max'
+            elif arch_choice == '3':
+                custom_id = input("请输入模型 ID (例如 qwen-plus-xxx): ").strip()
+                if custom_id:
+                    self.architect_model = custom_id
+                else:
+                    self.architect_model = 'qwen-plus'
+            else:
+                self.architect_model = 'qwen-plus'
+
+        # 外部导入模式：若缺少 JSON，则为每个选中章节生成 toc_source.txt 并退出
+        if self.map_source == 'external':
+            need_exit = False
+            for chap_name, info in tasks.items():
+                structure_map = self._load_structure_map(chap_name, Path(self.input_dir), Path(self.output_dir))
+                if not structure_map:
+                    self.console.print(f"[yellow]⚠️ 未发现 {chap_name} 的 structure_map.json，将生成 toc_source.txt 与标准 Prompt。[/]")
+                    self.generate_toc_source_file(chap_name, info['files'], Path(self.output_dir))
+                    need_exit = True
+                else:
+                    # 外部 JSON 校验
+                    try:
+                        self._validate_structure_map(structure_map)
+                    except Exception as e:
+                        self.console.print(f"[red]❌ {chap_name} 的 structure_map.json 非法: {e}")
+                        need_exit = True
+            if need_exit:
+                self.console.print("\n[bold yellow]请完成外部模型生成 JSON 并保存后重新运行本程序。[/]")
+                return
 
         confirm = input("\n👉 是否继续生成 LaTeX? (Y/n): ").strip().lower()
         if confirm != 'y' and confirm != '':
@@ -932,6 +1286,17 @@ class WorkflowController:
         latex_out_dir = Path(self.output_dir)
         latex_out_dir.mkdir(parents=True, exist_ok=True)
         
+        # 若内部生成模式，先为各章节生成结构地图（LLM 架构师）
+        if self.map_source == 'internal':
+            map_gen = MapGenerator(model_name=self.architect_model)
+            for chap_name, info in tasks.items():
+                lines, last_slide = self._collect_toc_source(info['files'])
+                toc_text = "\n".join(lines)
+                structure_map = map_gen.generate_structure(toc_text, last_slide, mode=self.scope_mode, title=chap_name)
+                inter_dir = latex_out_dir / 'intermediates' / chap_name
+                inter_dir.mkdir(parents=True, exist_ok=True)
+                (inter_dir / 'structure_map.json').write_text(json.dumps(structure_map, ensure_ascii=False, indent=2), encoding='utf-8')
+
         # 3. 准备生成
         self.console.print("\n[bold green]🚀 任务开始 (Nested Parallel Mode)...[/]")
         
@@ -994,7 +1359,12 @@ class WorkflowController:
             # 1. 准备数据: 合并 -> 智能切分
             self.logger.info(f"[{chap_name}] Loading files...")
             full_md, slide_map = ctx_mgr.load_and_merge_files(task_info['files']) # 获取 slide_map
-            chunk_tasks = ctx_mgr.create_smart_chunks(full_md, slide_map) # 传入 slide_map
+            # 加载结构地图并构建查表
+            structure_map = self._load_structure_map(chap_name, Path(self.input_dir), latex_out_dir)
+            if structure_map:
+                self._validate_structure_map(structure_map)
+            instruction_lookup = self._build_instruction_lookup(structure_map) if structure_map else {}
+            chunk_tasks = ctx_mgr.create_smart_chunks(full_md, slide_map, instruction_lookup) # 查表优先
             total_chunks = len(chunk_tasks)
             
             self.logger.info(f"[{chap_name}] Split into {total_chunks} chunks. Checking local cache in {intermediate_dir}...")
@@ -1071,12 +1441,12 @@ class WorkflowController:
                             
                             # === 清理: 移除 Metadata 块 (最终输出不需要) ===
                             content = re.sub(r'<!-- METADATA[\s\S]*?-->', '', content)
-                            
-                            # === 清理: 移除 Markdown 代码块包裹 ===
-                            # 移除开头的 ```latex 或 ``` (允许前导空白)
-                            content = re.sub(r'^\s*```(latex)?\s*\n', '', content, flags=re.IGNORECASE)
-                            # 移除结尾的 ``` (允许尾随空白)
-                            content = re.sub(r'\n\s*```\s*$', '', content)
+                            # === 清理: 移除所有 Markdown 代码围栏与架构师提示语 ===
+                            content = re.sub(r'^\s*```(latex)?\s*\n', '', content, flags=re.IGNORECASE | re.MULTILINE)
+                            content = re.sub(r'\n\s*```\s*\n?', '\n', content)
+                            content = re.sub(r'^.*架构师指令.*\n?', '', content, flags=re.MULTILINE)
+                            # 若仍有残留三反引号，整体剔除
+                            content = content.replace('```', '')
                             
                             f.write(f"% --- Part {i+1}/{total_chunks} ---\n")
                             f.write(content.strip())
@@ -1096,6 +1466,7 @@ class WorkflowController:
         """原子任务：将单个 Chunk 转 LaTeX，带重试"""
         total = item.get('total', '?')
         index = item.get('index', 0) + 1
+        map_directive = item.get('map_directive', '') or ""
         
         # [RateLimit] 申请发射令牌 (阻断过快的请求)
         self.rate_limiter.wait_for_slot()
@@ -1112,7 +1483,8 @@ class WorkflowController:
             index, 
             total,
             item.get('structure_hint', ''), # 传入 structure_hint
-            item.get('chapter_toc', '')
+            item.get('chapter_toc', ''),
+            item.get('map_directive', '')
         )
         
         max_retries = 5
@@ -1152,7 +1524,7 @@ class WorkflowController:
         
         raise Exception(f"Failed after {max_retries} retries: {last_error}")
 
-    def _build_prompt(self, chunk, prev_md, next_md, index=None, total=None, structure_hint="", chapter_toc=""):
+    def _build_prompt(self, chunk, prev_md, next_md, index=None, total=None, structure_hint="", chapter_toc="", map_directive = None):
         # 移除过多的 CTX 标记干扰
         chunk = re.sub(r'<CTX>.*?</CTX>', '', chunk, flags=re.DOTALL)
         if prev_md: prev_md = re.sub(r'<CTX>.*?</CTX>', '', prev_md, flags=re.DOTALL)
@@ -1171,6 +1543,40 @@ class WorkflowController:
         # 插入结构信息
         if structure_hint:
              prompt += f"\n\n{structure_hint}\n"
+
+        if map_directive:
+            prompt += "\n【架构师地图指令（必须遵守）】\n"
+            directives = map_directive if isinstance(map_directive, list) else [map_directive]
+            for d in directives:
+                if isinstance(d, str):
+                    # 兼容旧格式
+                    if d.startswith('START_SECTION_AND_SUBSECTION'):
+                        parts = d.split('::')
+                        if len(parts) >= 4:
+                            prompt += (
+                                f"- 当前是新章节《{parts[1]}》及其子章节《{parts[2]}》的起始页（{parts[3]}）。"
+                                f"请在本段开头依次输出 \\section{{{parts[1]}}} 与 \\subsection{{{parts[2]}}}，后续本段内不要重复生成章节/子章节标题。\n"
+                            )
+                    elif d.startswith('START_SECTION'):
+                        parts = d.split('::')
+                        if len(parts) >= 3:
+                            prompt += f"- 当前是新章节《{parts[1]}》的起始页（{parts[2]}）。请在本段开头输出一次 \\section{{{parts[1]}}}，后续本段内不要重复生成章节标题。\n"
+                    elif d.startswith('START_SUBSECTION'):
+                        parts = d.split('::')
+                        if len(parts) >= 3:
+                            prompt += f"- 当前是子章节《{parts[1]}》的起始页（{parts[2]}）。请在本段开头输出一次 \\subsection{{{parts[1]}}}，后续本段内不要重复生成子章节标题。\n"
+                    elif d.startswith('NO_HEADER'):
+                        parts = d.split('::')
+                        if len(parts) >= 3:
+                            prompt += f"- 当前处于章节《{parts[1]}》内部（{parts[2]}）。请勿生成章节或子章节标题，只输出正文。\n"
+                elif isinstance(d, dict):
+                    d_type = d.get('type','')
+                    if d_type == 'START_SECTION':
+                        prompt += f"- 请在本段开头输出一次 \\section{{{d.get('title','')}}}（对应 Slide {d.get('slide','?')}）。\n"
+                    elif d_type == 'START_SUBSECTION':
+                        prompt += f"- 请在本段开头输出一次 \\subsection{{{d.get('title','')}}}（对应 Slide {d.get('slide','?')}），父章节《{d.get('parent','')}》。\n"
+                    elif d_type == 'NO_HEADER':
+                        prompt += f"- 当前处于章节《{d.get('parent','')}》内部（Slide {d.get('slide','?')}）。请勿生成章节或子章节标题，只输出正文。\n"
 
         if prev_md:
             prompt += f"\n\n【上文 Markdown (仅供衔接参考)】\n{prev_md}...\n"

@@ -67,3 +67,48 @@ latex_output/
 ---
 **依赖**: 需要 `rich` 和 `dashscope` 库。
 **模型**: 默认使用 `qwen3-max-preview` (Logic Strong) 以确保 LaTeX 语法准确性。
+
+## 🤝 外部导入 (External Import)
+
+*   **架构师-施工队模式**：支持由外部更强模型（Gemini 3 Pro, GPT5.2 等）生成结构地图 `structure_map.json`，本工具作为施工队严格按地图插入 `\section/\subsection`。
+*   **自动辅助**：当选择“外部导入”但缺少 `structure_map.json` 时，系统会自动生成 `toc_source.txt`（汇总每页关键词与摘要），并在控制台打印标准 Prompt 模板，方便直接复制到外部模型。
+*   **闭环步骤**：
+        1. 运行本程序，选择章节并选择“外部导入”。
+        2. 系统生成 `latex_output/intermediates/<章节>/toc_source.txt` 并打印标准 Prompt。
+        3. 将该文件与提示词交给外部模型生成严格 JSON，保存为 `structure_map.json`。
+        4. 重新运行本程序，开始施工生成 LaTeX。
+
+### 标准 Prompt 模板（节选）
+
+```
+# Role
+你是一位专业的学术教材主编。
+
+# Context
+我将上传一份课堂笔记的“页面摘要清单”（toc_source.txt），其中包含了每一页 PPT (Slide) 的编号、关键词和内容摘要。
+
+# Task
+请分析这份摘要流的逻辑连贯性，将其重构为一份结构严谨、层级清晰的 LaTeX 目录结构数据。
+
+# Requirements
+1. 聚合与归纳：识别连续话题为同一 `section`，适当使用 `subsection`。
+2. 完整性：覆盖从 Slide 1 到最后一页，范围连续且不重叠。
+3. 输出严格 JSON，无 Markdown 代码块标记。
+```
+
+### 结构 JSON Schema（示例）
+
+```json
+{
+    "meta": { "mode": "chapter", "title": "章节标题" },
+    "structure": [
+        { "level": "section", "title": "第一节", "start_slide": 1, "end_slide": 10,
+            "subsections": [
+                { "level": "subsection", "title": "子节 A", "start_slide": 1, "end_slide": 5 },
+                { "level": "subsection", "title": "子节 B", "start_slide": 6, "end_slide": 10 }
+            ]
+        },
+        { "level": "section", "title": "第二节", "start_slide": 11, "end_slide": 20 }
+    ]
+}
+```
