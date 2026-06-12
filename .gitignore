@@ -15,7 +15,24 @@ markdown_output_*/
 log/
 latex_output/
 session_*.json
+.cache/
+FULL_PRESENTATION.md
+*_FULL.md
+Raw_*.json
+
+# Local secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.local.json
+
+# Local reference/scratch files
+参考价格文档/
 
 # Python cache files
 __pycache__/
 *.py[cod]
+.claude/

@@ -13,6 +13,22 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="PPT2MD-V10 (Parallel Brain & Stream Fixed)")
     parser.add_argument("-n", "--name", type=str, default="default", help="任务会话名称")
     parser.add_argument("-o", "--output", type=str, default="./markdown_output", help="输出目录路径")
+
+    # 模型目录管理
+    parser.add_argument("--list-models", action="store_true", help="列出可用模型，然后退出")
+    parser.add_argument("--list-all-models", action="store_true", help="列出完整缓存模型目录（包含未验证候选）")
+    parser.add_argument("--refresh-models", action="store_true", help="从阿里云文档刷新候选模型列表并缓存")
+    parser.add_argument("--verify-models", action="store_true", help="用 API 验证模型可用性（需要 DASHSCOPE_API_KEY）")
+    parser.add_argument("--region", type=str, default="cn-beijing", help="阿里云地域（默认 cn-beijing）")
+    parser.add_argument("--base-url", type=str,
+                        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        help="OpenAI 兼容端点")
+    parser.add_argument("--model-cache", type=str,
+                        default=".cache/aliyun_model_catalog.json",
+                        help="模型缓存文件路径")
+    parser.add_argument("--verify-limit", type=int, default=20, help="最多验证 N 个模型（默认 20）")
+    parser.add_argument("--verify-sleep", type=float, default=0.3, help="验证间隔秒数（默认 0.3）")
+
     return parser.parse_args(argv)
 
 
@@ -35,6 +51,15 @@ def build_config(args):
     return AppConfig(
         session_name=args.name,
         output_folder=str(Path(args.output).resolve()),
+        region=args.region,
+        openai_base_url=args.base_url,
+        model_cache_path=args.model_cache,
+        verify_limit=args.verify_limit,
+        verify_sleep=args.verify_sleep,
+        list_models=args.list_models,
+        list_all_models=args.list_all_models,
+        refresh_models=args.refresh_models,
+        verify_models=args.verify_models,
     )
 
 
@@ -43,6 +68,141 @@ def configure_stdio():
         stream = getattr(sys, stream_name, None)
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _handle_model_commands(console, config: AppConfig):
+    """处理 --list-models / --refresh-models / --verify-models 命令。"""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    from .aliyun_catalog import (
+        fetch_model_ids_from_docs,
+        records_to_cache_dict,
+        save_cache,
+        verify_models,
+    )
+    from .env import get_dashscope_api_key
+    from .model_catalog import load_model_catalog, static_to_records
+
+    # Step 1: 刷新（联网抓取文档）
+    if config.refresh_models:
+        console.print("[bold cyan]🔍 正在从阿里云文档抓取候选模型 ...[/]")
+        dynamic = fetch_model_ids_from_docs()
+        console.print(f"   从文档提取到 {len(dynamic)} 个候选模型")
+
+        # 写入缓存
+        cache_data = records_to_cache_dict(
+            dynamic,
+            source_urls=[],  # 由 fetch 内部记录
+            region=config.region,
+            base_url=config.openai_base_url,
+        )
+        save_cache(config.model_cache_path, cache_data)
+        console.print(f"   [green]✅ 缓存已写入 {config.model_cache_abs_path}[/]")
+
+    # Step 2: 验证
+    if config.verify_models:
+        api_key = get_dashscope_api_key()
+        if not api_key:
+            console.print("[bold red]❌ 验证模型需要 DASHSCOPE_API_KEY 环境变量。[/]")
+            return
+
+        records = load_model_catalog(
+            prefer_cache=True,
+            cache_path=config.model_cache_path,
+            curated=not config.list_all_models,
+        )
+        console.print(
+            f"[bold cyan]🧪 验证模型可用性（最多 {config.verify_limit} 个，间隔 {config.verify_sleep}s）...[/]"
+        )
+        console.print(f"   Base URL: {config.openai_base_url}")
+        verify_models(
+            records,
+            api_key=api_key,
+            base_url=config.openai_base_url,
+            limit=config.verify_limit,
+            sleep_interval=config.verify_sleep,
+            console=console,
+        )
+        # 回写缓存（更新验证状态）
+        cache_data = records_to_cache_dict(
+            records,
+            source_urls=[],
+            region=config.region,
+            base_url=config.openai_base_url,
+        )
+        save_cache(config.model_cache_path, cache_data)
+        console.print(f"   [green]✅ 验证结果已写入缓存[/]")
+
+    # Step 3: 列出
+    if config.list_models or config.list_all_models:
+        records = load_model_catalog(
+            prefer_cache=True,
+            cache_path=config.model_cache_path,
+            curated=not config.list_all_models,
+        )
+        _display_models_table(console, records)
+
+
+def _display_models_table(console, records, max_rows=120):
+    """以 Rich 表格展示模型目录（含能力矩阵）。"""
+    from rich.table import Table
+
+    from .aliyun_catalog import filter_brain_models, filter_vision_models
+
+    table = Table(title="📋 当前模型目录", show_header=True, header_style="bold magenta")
+    table.add_column("Model ID", width=28)
+    table.add_column("Provider", width=10)
+    table.add_column("Vision", width=6, justify="center")
+    table.add_column("OAI Txt", width=7)
+    table.add_column("OAI Vis", width=7)
+    table.add_column("DS Mul", width=7)
+    table.add_column("Input ¥/M", justify="right", width=10)
+    table.add_column("Output ¥/M", justify="right", width=10)
+    table.add_column("Price Src", width=12)
+    table.add_column("Region", width=10)
+
+    def _cap_icon(status: str) -> str:
+        return {"ok": "✅", "failed": "❌", "skipped": "⏭"}.get(status, "·")
+
+    display_records = records[:max_rows]
+    for rec in display_records:
+        vis = "✅" if rec.supports_vision is True else ("❌" if rec.supports_vision is False else "?")
+        inp = f"{rec.input_price:.3g}" if rec.input_price is not None else "?"
+        out = f"{rec.output_price:.3g}" if rec.output_price is not None else "?"
+        src = rec.price_source or "-"
+        region = rec.price_region or "-"
+
+        table.add_row(
+            rec.model_id,
+            rec.provider,
+            vis,
+            _cap_icon(rec.openai_text_status),
+            _cap_icon(rec.openai_vision_status),
+            _cap_icon(rec.dashscope_multimodal_status),
+            inp,
+            out,
+            src,
+            region,
+        )
+
+    console.print(table)
+
+    # 分类统计
+    visions = filter_vision_models(records)
+    brains = filter_brain_models(records)
+    vision_ok = sum(1 for r in visions if r.openai_vision_status == "ok" or r.dashscope_multimodal_status == "ok")
+    text_ok = sum(1 for r in brains if r.openai_text_status == "ok")
+    priced = sum(1 for r in records if r.input_price is not None)
+    console.print(
+        f"[dim]共 {len(records)} 个模型 | "
+        f"当前显示: {len(display_records)} | "
+        f"Vision 候选: {len(visions)} (可用: {vision_ok}) | "
+        f"Brain 候选: {len(brains)} (文本通: {text_ok}) | "
+        f"有价格: {priced}[/]"
+    )
+    if len(records) > len(display_records):
+        console.print("[dim]完整目录保存在模型缓存 JSON 中；交互 UI 默认只使用精选目录。[/]")
 
 
 def main(argv=None):
@@ -66,7 +226,7 @@ def main(argv=None):
     )
 
     from .cost import show_cost_estimation
-    from .files import check_env, setup_logger
+    from .files import check_runtime_env, ensure_input_folder, setup_logger
     from .model_settings import configure_models
     from .pipeline import process_single_ppt_task
     from .session import interactive_setup
@@ -74,12 +234,23 @@ def main(argv=None):
     config = build_config(args)
     console = Console()
 
-    final_key, msg = check_env(config)
-    if not final_key:
+    # ── 模型目录管理模式 ──
+    any_model_cmd = config.list_models or config.list_all_models or config.refresh_models or config.verify_models
+    if any_model_cmd:
+        _handle_model_commands(console, config)
+        return 0
+
+    input_ready, msg = ensure_input_folder(config)
+    if not input_ready:
         console.print(msg)
         return 1
 
     config = configure_models(console, config)
+    final_key, msg = check_runtime_env(config)
+    if not final_key:
+        console.print(msg)
+        return 1
+
     logger, log_file_path = setup_logger(config)
     console.print(
         Panel(
@@ -102,6 +273,7 @@ def main(argv=None):
         return 0
 
     show_cost_estimation(console, tasks_config, config)
+    console.print("[dim]说明：终端 ETA 由 Rich 根据当前进度估算，API 延迟波动较大；准确耗时请以 log 中的 Stage 耗时为准。[/]")
     if input("👉 确认开始任务吗？(y/n) [默认为 y]: ").strip().lower() == "n":
         print("已取消。")
         return 0

@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import perf_counter
 
 from .config import AppConfig
 from .files import merge_markdowns, read_json, write_json
@@ -10,7 +11,7 @@ def process_single_ppt_task(ppt_name, task_config, msg_queue, config: AppConfig)
     """
     双阶段流水线控制器。
     """
-    set_dashscope_api_key()
+    set_dashscope_api_key(config)
 
     images_paths = task_config["images"]
     start_idx = task_config["range_start"]
@@ -37,6 +38,7 @@ def process_single_ppt_task(ppt_name, task_config, msg_queue, config: AppConfig)
     )
     msg_queue.put(("init_task", task_id, total_slides * 2))
 
+    pipeline_started = perf_counter()
     raw_data_map = _run_vision_stage(
         ppt_name=ppt_name,
         target_images=target_images,
@@ -62,15 +64,19 @@ def process_single_ppt_task(ppt_name, task_config, msg_queue, config: AppConfig)
 
     msg_queue.put(("status", task_id, "正在合并..."))
     merge_markdowns(ppt_root, ppt_name)
-    msg_queue.put(("log", f"[{ppt_name}] 全部流程结束"))
+    msg_queue.put(("log", f"[{ppt_name}] 全部流程结束，总耗时 {perf_counter() - pipeline_started:.1f}s"))
     return f"{ppt_name} Done"
 
 
 def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg_queue, config: AppConfig):
+    stage_started = perf_counter()
     msg_queue.put(("status", task_id, f"[cyan]Step 1: 视觉提取 (并发 {config.vision_batch_workers})..."))
 
     vision_futures = {}
     raw_data_map = {}
+    cache_hits = 0
+    submitted = 0
+    failed = 0
 
     with ThreadPoolExecutor(max_workers=config.vision_batch_workers) as executor:
         for i, img_path in enumerate(target_images):
@@ -83,6 +89,7 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
                     raw_data_map[actual_slide_no] = data["raw_text"]
                     msg_queue.put(("log", f"[{ppt_name}] P{actual_slide_no} 视觉缓存命中"))
                     msg_queue.put(("advance", task_id, 1))
+                    cache_hits += 1
                     continue
                 except Exception:
                     pass
@@ -96,6 +103,7 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
                 config,
             )
             vision_futures[future] = actual_slide_no
+            submitted += 1
 
         for future in as_completed(vision_futures):
             slide_no = vision_futures[future]
@@ -107,6 +115,7 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
                 else:
                     msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 视觉失败: {result.get('error')}"))
                     raw_data_map[slide_no] = "[Vision Failed]"
+                    failed += 1
             except RuntimeError as e:
                 msg_queue.put(("status", task_id, "[bold red]权限拒绝!"))
                 raise e
@@ -115,6 +124,15 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
             finally:
                 msg_queue.put(("advance", task_id, 1))
 
+    msg_queue.put(
+        (
+            "log",
+            (
+                f"[{ppt_name}] Step 1 完成，耗时 {perf_counter() - stage_started:.1f}s，"
+                f"缓存 {cache_hits}，提交 {submitted}，失败 {failed}"
+            ),
+        )
+    )
     return raw_data_map
 
 
@@ -128,9 +146,13 @@ def _run_brain_stage(
     msg_queue,
     config: AppConfig,
 ):
+    stage_started = perf_counter()
     msg_queue.put(("status", task_id, f"[green]Step 2: 并行思考 (并发 {config.brain_batch_workers})..."))
 
     brain_futures = {}
+    skipped = 0
+    submitted = 0
+    failed = 0
 
     with ThreadPoolExecutor(max_workers=config.brain_batch_workers) as executor:
         for i in range(total_slides):
@@ -139,6 +161,7 @@ def _run_brain_stage(
 
             if output_path.exists() and output_path.stat().st_size > 100:
                 msg_queue.put(("advance", task_id, 1))
+                skipped += 1
                 continue
 
             future = executor.submit(
@@ -148,6 +171,7 @@ def _run_brain_stage(
                 config,
             )
             brain_futures[future] = (actual_slide_no, output_path)
+            submitted += 1
 
         for future in as_completed(brain_futures):
             slide_no, output_path = brain_futures[future]
@@ -159,5 +183,16 @@ def _run_brain_stage(
                 msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组完成"))
             except Exception as e:
                 msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组异常: {e}"))
+                failed += 1
             finally:
                 msg_queue.put(("advance", task_id, 1))
+
+    msg_queue.put(
+        (
+            "log",
+            (
+                f"[{ppt_name}] Step 2 完成，耗时 {perf_counter() - stage_started:.1f}s，"
+                f"跳过 {skipped}，提交 {submitted}，失败 {failed}"
+            ),
+        )
+    )

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .config import AppConfig
-from .env import get_dashscope_api_key
+from .env import get_env_value
 
 
 def setup_logger(config: AppConfig):
@@ -30,21 +30,88 @@ def setup_logger(config: AppConfig):
     return logger, str(log_file)
 
 
+def ensure_input_folder(config: AppConfig):
+    if not config.input_path.exists():
+        try:
+            config.input_path.mkdir(parents=True, exist_ok=True)
+            return False, f"⚠️ 输入文件夹 {config.input_folder} 不存在，已创建。请把图片放进去后重新运行。"
+        except OSError:
+            return False, f"❌ 无法创建文件夹 {config.input_folder}。"
+
+    return True, "输入文件夹检查通过"
+
+
+def check_runtime_env(config: AppConfig):
+    required = _required_api_envs(config)
+    if not required:
+        return "set", "环境检查通过"
+
+    missing = []
+    first_key = None
+    for role, provider, env_name in required:
+        value = get_env_value(env_name)
+        if value:
+            first_key = first_key or value
+            continue
+
+        if provider == "dashscope":
+            try:
+                import dashscope
+
+                if dashscope.api_key:
+                    first_key = first_key or dashscope.api_key
+                    continue
+            except ImportError:
+                pass
+
+        missing.append((role, provider, env_name))
+
+    if missing:
+        lines = [
+            "❌ 未检测到所选模型需要的 API Key 环境变量：",
+            *[f"  - {role}: {provider} 需要 {env_name}" for role, provider, env_name in missing],
+            "请在模型选择的自定义 API 流程中粘贴保存，或手动设置系统环境变量后重新运行。",
+        ]
+        return None, "\n".join(lines)
+
+    return first_key or "set", "环境检查通过"
+
+
+def _required_api_envs(config: AppConfig):
+    items = [
+        ("Step 1 Vision", config.vision_provider, config.vision_api_key_env),
+        ("Step 2 Brain", config.brain_provider, config.brain_api_key_env),
+    ]
+    required = []
+    seen = set()
+    for role, provider, env_name in items:
+        if not env_name:
+            continue
+        key = (provider, env_name)
+        if key in seen:
+            continue
+        if provider in ("dashscope", "dashscope_openai", "deepseek", "openai_compatible"):
+            required.append((role, provider, env_name))
+            seen.add(key)
+    return required
+
+
 def check_env(config: AppConfig):
+    ok, msg = ensure_input_folder(config)
+    if not ok:
+        return None, msg
+    return check_runtime_env(config)
+
+
+def check_dashscope_env(config: AppConfig):
+    """Backward-compatible alias for callers that only need DashScope defaults."""
     import dashscope
 
-    api_key = get_dashscope_api_key()
+    api_key = get_env_value("DASHSCOPE_API_KEY")
     if not api_key and dashscope.api_key is None:
         return None, "❌ 未检测到 API Key。请设置环境变量 DASHSCOPE_API_KEY。"
 
     final_key = api_key if api_key else dashscope.api_key
-    if not config.input_path.exists():
-        try:
-            config.input_path.mkdir(parents=True, exist_ok=True)
-            return None, f"⚠️ 输入文件夹 {config.input_folder} 不存在，已创建。"
-        except OSError:
-            return None, f"❌ 无法创建文件夹 {config.input_folder}。"
-
     return final_key, "环境检查通过"
 
 

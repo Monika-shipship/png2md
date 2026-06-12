@@ -1,4 +1,7 @@
+import functools
 import json
+import logging
+import re
 import time
 import urllib.error
 import urllib.request
@@ -7,9 +10,238 @@ import dashscope
 from dashscope import Generation, MultiModalConversation
 
 from .config import AppConfig
-from .env import get_dashscope_api_key, get_deepseek_api_key
+from .env import get_dashscope_api_key, get_deepseek_api_key, get_env_value
 from .prompts import PROMPT_STAGE_1_VISION, PROMPT_STAGE_2_BRAIN
 
+_logger = logging.getLogger("PPT2MD.models")
+
+
+# ==========================================================================
+# Retry / Backoff
+# ==========================================================================
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+_RETRYABLE_EXCEPTIONS = (urllib.error.URLError, ConnectionError, TimeoutError, OSError)
+
+
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_sleep: float = 2.0,
+    max_sleep: float = 60.0,
+):
+    """装饰器 / 手动包装器：对可重试的 HTTP 错误和网络异常做指数退避。
+
+    用法：
+        @retry_with_backoff(max_retries=3)
+        def my_api_call(...): ...
+
+    或手动：
+        result = retry_with_backoff(max_retries=3)(my_api_call)(...)
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except urllib.error.HTTPError as e:
+                    last_exc = e
+                    if e.code not in _RETRYABLE_CODES:
+                        raise
+                except _RETRYABLE_EXCEPTIONS as e:
+                    last_exc = e
+
+                if attempt < max_retries:
+                    delay = min(base_sleep * (2 ** attempt), max_sleep)
+                    _logger.info(
+                        "API retry %d/%d, sleeping %.1fs, error: %s",
+                        attempt + 1, max_retries, delay,
+                        _safe_error_str(last_exc),
+                    )
+                    time.sleep(delay)
+
+            raise last_exc  # type: ignore[misc]
+        return wrapper
+    return decorator
+
+
+def _safe_error_str(exc: BaseException) -> str:
+    """提取错误信息，避免泄漏 API Key。"""
+    msg = str(exc)
+    # 截断过长的消息
+    if len(msg) > 300:
+        msg = msg[:300] + "..."
+    return msg
+
+
+# ==========================================================================
+# OpenAI 兼容调用路径（DashScope 原生之外的可选路径）
+# ==========================================================================
+
+def call_aliyun_openai_chat(
+    model_id: str,
+    messages: list,
+    api_key: str,
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    stream: bool = True,
+    thinking_budget: int = 0,
+    enable_thinking: bool = False,
+    timeout: int = 900,
+):
+    """通过 OpenAI 兼容接口调用纯文本 Chat 模型。
+
+    Returns:
+        (full_content, full_reasoning) 或错误字符串。
+    """
+    payload: dict = {
+        "model": model_id,
+        "messages": messages,
+    }
+    if stream:
+        payload["stream"] = True
+
+    if enable_thinking and thinking_budget and thinking_budget > 0:
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = "medium"
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    if stream:
+        return _collect_openai_stream(req, timeout)
+    return _collect_openai_sync(req, timeout)
+
+
+def call_aliyun_openai_vision(
+    model_id: str,
+    image_path: str,
+    prompt_text: str,
+    api_key: str,
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    stream: bool = True,
+    timeout: int = 900,
+):
+    """通过 OpenAI 兼容 Vision 接口调用视觉模型。
+
+    Args:
+        model_id: 模型 ID。
+        image_path: 本地图片路径（file:// 格式或绝对路径）。
+        prompt_text: prompt 文本。
+        api_key: DashScope API Key。
+        base_url: OpenAI 兼容端点。
+        stream: 是否流式。
+        timeout: 超时秒数。
+
+    Returns:
+        (full_content, full_reasoning) 或错误字符串元组。
+    """
+    import base64 as b64
+
+    # 读取图片并编码
+    path = image_path.replace("file://", "")
+    try:
+        with open(path, "rb") as f:
+            img_data = b64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        return (f"Image read error: {e}", "")
+
+    # 推断 MIME 类型
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else "png"
+    mime_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp", "bmp": "bmp"}
+    mime = mime_map.get(ext, "png")
+
+    data_url = f"data:image/{mime};base64,{img_data}"
+
+    payload: dict = {
+        "model": model_id,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+    }
+    if stream:
+        payload["stream"] = True
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    if stream:
+        return _collect_openai_stream(req, timeout)
+    return _collect_openai_sync(req, timeout)
+
+
+def _collect_openai_stream(req: urllib.request.Request, timeout: int):
+    """收集 OpenAI 兼容流式响应。"""
+    full_content = ""
+    full_reasoning = ""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                full_reasoning += delta.get("reasoning_content") or ""
+                full_content += delta.get("content") or ""
+    except Exception as e:
+        return (f"OpenAI Stream Error: {_safe_error_str(e)}", full_reasoning)
+    return (full_content, full_reasoning)
+
+
+def _collect_openai_sync(req: urllib.request.Request, timeout: int):
+    """收集 OpenAI 兼容非流式响应。"""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        choices = body.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            return (msg.get("content") or "", msg.get("reasoning_content") or "")
+        return ("", "")
+    except Exception as e:
+        return (f"OpenAI Sync Error: {_safe_error_str(e)}", "")
+
+
+# ==========================================================================
+# Stage 1 & Stage 2 (原有逻辑保留)
+# ==========================================================================
 
 def run_stage_1_vision(img_path, slide_no, ppt_name, msg_queue, config: AppConfig):
     """
@@ -18,6 +250,9 @@ def run_stage_1_vision(img_path, slide_no, ppt_name, msg_queue, config: AppConfi
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            if config.vision_provider in ("dashscope_openai", "openai_compatible"):
+                return _run_openai_compatible_vision(img_path, slide_no, config)
+
             messages = [
                 {
                     "role": "user",
@@ -119,6 +354,36 @@ def run_stage_1_vision(img_path, slide_no, ppt_name, msg_queue, config: AppConfi
             time.sleep((attempt + 1) * 2)
 
 
+def _run_openai_compatible_vision(img_path, slide_no, config: AppConfig):
+    api_key = get_env_value(config.vision_api_key_env)
+    if not api_key:
+        return {
+            "success": False,
+            "slide_no": slide_no,
+            "error": f"missing {config.vision_api_key_env}",
+        }
+
+    content, reasoning = call_aliyun_openai_vision(
+        model_id=config.model_vision,
+        image_path=img_path,
+        prompt_text=PROMPT_STAGE_1_VISION,
+        api_key=api_key,
+        base_url=config.vision_base_url,
+        stream=True,
+    )
+    if content.startswith("OpenAI"):
+        return {"success": False, "slide_no": slide_no, "error": content}
+    if not content:
+        if reasoning:
+            return {
+                "success": True,
+                "slide_no": slide_no,
+                "raw_text": f"[Model only returned reasoning]\n\nReasoning Trace:\n{reasoning[:500]}...",
+            }
+        return {"success": False, "slide_no": slide_no, "error": "Empty response."}
+    return {"success": True, "slide_no": slide_no, "raw_text": content}
+
+
 def get_raw_content(raw_data_map, slide_no):
     """安全获取 Raw Data，并截断过长内容以节省 token。"""
     content = raw_data_map.get(slide_no, "(No Data / Out of Range)")
@@ -141,12 +406,63 @@ def run_stage_2_brain_parallel(slide_no, raw_data_map, config: AppConfig):
     )
 
     if config.brain_provider == "deepseek":
-        return _run_deepseek_brain(filled_prompt, config)
+        return sanitize_stage_2_markdown(_run_deepseek_brain(filled_prompt, config), slide_no)
 
-    return _run_dashscope_brain(filled_prompt, config)
+    if config.brain_provider in ("dashscope_openai", "openai_compatible"):
+        return sanitize_stage_2_markdown(_run_openai_compatible_brain(filled_prompt, config), slide_no)
+
+    return sanitize_stage_2_markdown(_run_dashscope_brain(filled_prompt, config), slide_no)
+
+
+def sanitize_stage_2_markdown(markdown: str, slide_no: int) -> str:
+    """Remove model chatter and internal metadata before writing a Slide_XX.md file."""
+    if not markdown:
+        return markdown
+
+    text = markdown.strip()
+
+    code_fence = re.fullmatch(r"```(?:markdown|md)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if code_fence:
+        text = code_fence.group(1).strip()
+
+    text = re.sub(r"<CTX>.*?</CTX>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    heading_pattern = re.compile(rf"(?m)^#\s*Slide\s+0*{slide_no}\b.*$")
+    heading_match = heading_pattern.search(text)
+    if heading_match:
+        text = text[heading_match.start():].strip()
+    else:
+        lines = text.splitlines()
+        while lines and _is_stage_2_chatter_line(lines[0]):
+            lines.pop(0)
+        text = "\n".join(lines).strip()
+        if not text.startswith("#"):
+            text = f"# Slide {slide_no}\n\n{text}".strip()
+
+    return text.rstrip() + "\n"
+
+
+def _is_stage_2_chatter_line(line: str) -> bool:
+    normalized = line.strip().lstrip("> ").strip()
+    if not normalized:
+        return True
+    chatter_prefixes = (
+        "好的",
+        "当然",
+        "以下是",
+        "下面是",
+        "作为",
+        "我已经",
+        "我将",
+        "根据您提供",
+        "基于您提供",
+        "已根据",
+    )
+    return normalized.startswith(chatter_prefixes)
 
 
 def _run_dashscope_brain(filled_prompt, config: AppConfig):
+    """DashScope 原生文本 API（默认稳定路径）。"""
     try:
         responses = Generation.call(
             model=config.model_brain,
@@ -182,10 +498,34 @@ def _run_dashscope_brain(filled_prompt, config: AppConfig):
         return f"Brain Exception: {str(e)}"
 
 
-def _run_deepseek_brain(filled_prompt, config: AppConfig):
-    api_key = get_deepseek_api_key()
+def _run_openai_compatible_brain(filled_prompt, config: AppConfig):
+    """OpenAI 兼容文本路径（DashScope compatible / OpenRouter / One API / LiteLLM 等）。"""
+    api_key = get_env_value(config.brain_api_key_env)
     if not api_key:
-        return "DeepSeek Error: missing DEEPSEEK_API_KEY."
+        return f"OpenAI Brain Error: missing {config.brain_api_key_env}."
+
+    content, reasoning = call_aliyun_openai_chat(
+        model_id=config.model_brain,
+        messages=[{"role": "user", "content": filled_prompt}],
+        api_key=api_key,
+        base_url=config.brain_base_url,
+        stream=True,
+        thinking_budget=config.thinking_budget_brain,
+        enable_thinking=(config.brain_provider == "dashscope_openai"),
+    )
+
+    if content.startswith("OpenAI") or content.startswith("Error"):
+        return content
+
+    if not content:
+        return f"Error: OpenAI Brain generated no content. Trace: {reasoning[:100]}..."
+    return content
+
+
+def _run_deepseek_brain(filled_prompt, config: AppConfig):
+    api_key = get_env_value(config.brain_api_key_env) or get_deepseek_api_key()
+    if not api_key:
+        return f"DeepSeek Error: missing {config.brain_api_key_env}."
 
     payload = {
         "model": config.model_brain,
@@ -195,7 +535,7 @@ def _run_deepseek_brain(filled_prompt, config: AppConfig):
         "stream": True,
     }
     request = urllib.request.Request(
-        "https://api.deepseek.com/chat/completions",
+        f"{config.brain_base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -246,8 +586,14 @@ def _run_deepseek_brain(filled_prompt, config: AppConfig):
         return f"DeepSeek Exception: {str(e)}"
 
 
-def set_dashscope_api_key(task_key=None):
+def set_dashscope_api_key(config: AppConfig = None, task_key=None):
     if task_key:
         dashscope.api_key = task_key
     else:
-        dashscope.api_key = get_dashscope_api_key()
+        key = None
+        if config is not None:
+            if config.vision_provider == "dashscope":
+                key = get_env_value(config.vision_api_key_env)
+            if not key and config.brain_provider == "dashscope":
+                key = get_env_value(config.brain_api_key_env)
+        dashscope.api_key = key or get_dashscope_api_key()
