@@ -9,6 +9,7 @@
 *.ico
 
 # Output and Input directories (inferred from project structure)
-# ppt_images/
+ppt_images/
 markdown_output/
 log/
+latex_output/
