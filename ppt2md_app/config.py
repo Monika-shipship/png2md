@@ -109,5 +109,9 @@ class AppConfig:
         return self.log_path / "model_settings.json"
 
     @property
+    def third_party_models_path(self) -> Path:
+        return self.log_path / "third_party_models.json"
+
+    @property
     def model_cache_abs_path(self) -> Path:
         return Path(self.model_cache_path)

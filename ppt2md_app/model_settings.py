@@ -17,6 +17,14 @@ from .aliyun_catalog import (
     verify_openai_chat_model,
     vision_recommendation_tier,
 )
+from .third_party_models import (
+    discover_openai_compatible_models,
+    filter_registry_models,
+    load_third_party_models,
+    parse_bulk_models_text,
+    upsert_third_party_model,
+    delete_third_party_model,
+)
 
 
 def configure_models(console, config: AppConfig):
@@ -26,7 +34,7 @@ def configure_models(console, config: AppConfig):
         prefer_cache=True,
         cache_path=config.model_cache_path,
     )
-    console.print(f"[dim]已加载 {len(records)} 个模型。[/]")
+    console.print(f"[dim]已加载 {len(records)} 个官方模型。[/]")
 
     saved = load_model_settings(config)
     if saved:
@@ -91,10 +99,7 @@ def choose_model(
     default_provider: str,
     default_model: str,
 ):
-    """紧凑版模型选择：每行一行，适合窄终端。"""
-    from .aliyun_catalog import vision_recommendation_tier
-
-    # 按角色过滤
+    """模型选择：官方目录 + 第三方模型管理。"""
     if role == ROLE_VISION:
         candidates = filter_vision_models(records)
         candidates.sort(key=lambda r: (vision_recommendation_tier(r), r.model_id))
@@ -106,30 +111,50 @@ def choose_model(
         ]
         _print_brain_candidates(console, candidates, title, default_provider, default_model)
 
+    third_party_items = filter_registry_models(load_third_party_models(config), role)
+    _print_third_party_candidates(console, third_party_items, role)
+
     display = candidates[:80]
     default_index = _find_record_index(display, default_provider, default_model)
 
-    selected = input(f">> 选择 [默认 {default_index}, c=自定义]: ").strip().lower()
-    if not selected:
-        selected = str(default_index)
+    while True:
+        selected = input(
+            f">> 选择 [默认 {default_index}, t=第三方模型, c=新增第三方模型, m=管理第三方模型]: "
+        ).strip().lower()
+        if not selected:
+            selected = str(default_index)
 
-    if selected == "c":
-        return _custom_model_config_enhanced(console, config, role)
+        if selected == "c":
+            created = _create_third_party_model_wizard(console, config, role)
+            if created:
+                return _apply_registry_item(config, role, created)
+            _print_third_party_candidates(console, filter_registry_models(load_third_party_models(config), role), role)
+            continue
 
-    try:
-        index = int(selected)
-    except ValueError:
-        index = default_index
-    if not 1 <= index <= len(display):
-        index = default_index
+        if selected == "m":
+            chosen = _manage_third_party_models(console, config, role)
+            if chosen:
+                return _apply_registry_item(config, role, chosen)
+            _print_third_party_candidates(console, filter_registry_models(load_third_party_models(config), role), role)
+            continue
 
-    return _apply_record(config, role, display[index - 1])
+        if selected == "t":
+            chosen = _select_third_party_model(console, config, role)
+            if chosen:
+                return _apply_registry_item(config, role, chosen)
+            continue
+
+        try:
+            index = int(selected)
+        except ValueError:
+            index = default_index
+        if not 1 <= index <= len(display):
+            index = default_index
+        return _apply_record(config, role, display[index - 1])
 
 
 def _print_vision_candidates(console, candidates, title, default_provider, default_model):
     """紧凑版 Vision 模型列表。"""
-    from .aliyun_catalog import vision_recommendation_tier
-
     tier_labels = {0: "REC", 1: "CAN", 2: "FAIL"}
     console.print(f"\n[bold cyan]{title}[/] [dim](REC=已验证推荐 CAN=候选 FAIL=验证失败)[/]")
     console.print(f"[dim]{'':>3} {'Tier':4} {'Model ID':30} {'Vision':8} {'Price(in/out)/M':18} {'Source':10}[/]")
@@ -165,7 +190,9 @@ def _print_vision_candidates(console, candidates, title, default_provider, defau
         else:
             console.print(line)
 
-    console.print(f"[dim]{'c':>3}  {'CUS':4} {'自定义模型':30}[/]")
+    console.print(f"[dim]{'t':>3}  {'3P':4} {'已保存第三方模型':30}[/]")
+    console.print(f"[dim]{'c':>3}  {'ADD':4} {'新增第三方模型':30}[/]")
+    console.print(f"[dim]{'m':>3}  {'MGR':4} {'管理第三方模型':30}[/]")
     console.print()
 
 
@@ -187,7 +214,6 @@ def _print_brain_candidates(console, candidates, title, default_provider, defaul
         src = (rec.price_source or "-")[:10]
         prov = rec.provider[:10]
 
-        # 高亮已通过文本验证的模型
         style = "green" if rec.openai_text_status == "ok" else ""
         line = f"{marker}{i:>2d}  {'':4} {rec.model_id:30} {txt:6} {price:18} {src:10} {prov:10}"
         if style:
@@ -195,12 +221,29 @@ def _print_brain_candidates(console, candidates, title, default_provider, defaul
         else:
             console.print(line)
 
-    console.print(f"[dim]{'c':>3}  {'CUS':4} {'自定义模型':30}[/]")
+    console.print(f"[dim]{'t':>3}  {'3P':4} {'已保存第三方模型':30}[/]")
+    console.print(f"[dim]{'c':>3}  {'ADD':4} {'新增第三方模型':30}[/]")
+    console.print(f"[dim]{'m':>3}  {'MGR':4} {'管理第三方模型':30}[/]")
     console.print()
 
 
+def _print_third_party_candidates(console, items, role: str):
+    role_label = "Vision" if role == ROLE_VISION else "Brain"
+    console.print(f"[bold magenta]第三方模型（适用于 {role_label}）[/]")
+    if not items:
+        console.print("[dim]  暂无已保存的第三方模型。可输入 c 新增，或输入 m 进入管理菜单。[/]")
+        return
+    for index, item in enumerate(items, start=1):
+        roles = "/".join(item.get("roles") or [])
+        provider = item.get("provider") or "openai_compatible"
+        model_id = item.get("model_id") or "-"
+        alias = item.get("name") or model_id
+        price = _format_registry_price(item)
+        console.print(f"  [magenta]{index}.[/] {alias} -> {model_id} [{provider}] roles={roles} {price}")
+    console.print("[dim]输入 t 可从已保存第三方模型中直接选择。[/]")
+
+
 def _cap_icon(status: str) -> str:
-    """能力矩阵图标。"""
     if status == "ok":
         return "✅"
     if status == "failed":
@@ -218,7 +261,6 @@ def _find_record_index(records, provider, model_id):
 
 
 def _apply_record(config: AppConfig, role: str, rec: ModelRecord):
-    """将 ModelRecord 应用到 AppConfig。"""
     base_url, api_key_env = _provider_defaults(rec.provider, role, config)
     if role == ROLE_VISION:
         return replace(
@@ -241,6 +283,28 @@ def _apply_record(config: AppConfig, role: str, rec: ModelRecord):
     )
 
 
+def _apply_registry_item(config: AppConfig, role: str, item: Dict):
+    if role == ROLE_VISION:
+        return replace(
+            config,
+            vision_provider=item.get("provider") or config.vision_provider,
+            model_vision=item.get("model_id") or config.model_vision,
+            vision_base_url=item.get("base_url") or config.vision_base_url,
+            vision_api_key_env=item.get("api_key_env") or config.vision_api_key_env,
+            vision_input_price_per_million=item.get("input_price"),
+            vision_output_price_per_million=item.get("output_price"),
+        )
+    return replace(
+        config,
+        brain_provider=item.get("provider") or config.brain_provider,
+        model_brain=item.get("model_id") or config.model_brain,
+        brain_base_url=item.get("base_url") or config.brain_base_url,
+        brain_api_key_env=item.get("api_key_env") or config.brain_api_key_env,
+        brain_input_price_per_million=item.get("input_price"),
+        brain_output_price_per_million=item.get("output_price"),
+    )
+
+
 def _provider_defaults(provider, role, config: AppConfig):
     if provider == "deepseek":
         return "https://api.deepseek.com", "DEEPSEEK_API_KEY"
@@ -252,54 +316,292 @@ def _provider_defaults(provider, role, config: AppConfig):
     )
 
 
-def _custom_model_config_enhanced(console, config: AppConfig, role: str):
-    """增强版自定义模型输入，支持可选 API 验证。"""
-    provider, base_url, api_key_env = _read_custom_provider(console, config, role)
+def _select_third_party_model(console, config: AppConfig, role: str):
+    items = filter_registry_models(load_third_party_models(config), role)
+    if not items:
+        console.print("[yellow]当前没有可用的第三方模型。[/]")
+        return None
+    _print_third_party_candidates(console, items, role)
+    selected = input("   请输入第三方模型编号 [回车取消]: ").strip()
+    if not selected:
+        return None
+    try:
+        index = int(selected)
+    except ValueError:
+        console.print("[yellow]编号无效。[/]")
+        return None
+    if not 1 <= index <= len(items):
+        console.print("[yellow]编号超出范围。[/]")
+        return None
+    return items[index - 1]
 
+
+def _manage_third_party_models(console, config: AppConfig, role: str):
+    while True:
+        items = load_third_party_models(config)
+        console.print("\n[bold magenta]第三方模型管理[/]")
+        if items:
+            for index, item in enumerate(items, start=1):
+                roles = "/".join(item.get("roles") or [])
+                console.print(
+                    f"  [{index}] {item.get('name')} -> {item.get('model_id')} "
+                    f"[{item.get('provider')}] roles={roles}"
+                )
+        else:
+            console.print("[dim]当前还没有保存任何第三方模型。[/]")
+
+        console.print("[dim]可选操作: a=新增, b=批量导入, d=自动发现, e=编辑, x=删除, s=选择, q=返回[/]")
+        action = input("   操作: ").strip().lower()
+        if action in ("q", "quit", ""):
+            return None
+        if action == "a":
+            created = _create_third_party_model_wizard(console, config, role)
+            if created:
+                use_now = input("   已保存。立即用于当前步骤吗？(y/n) [默认 y]: ").strip().lower()
+                if use_now != "n":
+                    return created
+            continue
+        if action == "b":
+            _bulk_import_third_party_models(console, config, role)
+            continue
+        if action == "d":
+            discovered = _discover_and_import_models(console, config, role)
+            if discovered:
+                return discovered
+            continue
+        if action == "e":
+            _edit_third_party_model(console, config)
+            continue
+        if action == "x":
+            _delete_third_party_model(console, config)
+            continue
+        if action == "s":
+            chosen = _select_third_party_model(console, config, role)
+            if chosen:
+                return chosen
+            continue
+        console.print("[yellow]未知操作，请重试。[/]")
+
+
+def _create_third_party_model_wizard(console, config: AppConfig, role: str):
+    console.print("\n[bold]新增第三方模型[/]")
+    provider, base_url, api_key_env = _read_custom_provider(console, config, role)
     model_id = input("   模型 ID: ").strip()
     if not model_id:
-        model_id = config.model_vision if role == ROLE_VISION else config.model_brain
+        console.print("   [yellow]模型 ID 不能为空。[/]")
+        return None
 
+    name = input(f"   显示名称/别名 [默认 {model_id}]: ").strip() or model_id
+    default_roles = role if role in (ROLE_VISION, ROLE_BRAIN) else ROLE_BRAIN
+    roles_raw = input(f"   用途角色 (vision/brain/both) [默认 {default_roles}]: ").strip() or default_roles
+    supports_vision = _ask_supports_vision(role)
     input_price = _read_optional_float("   输入价格 元/百万 tokens (未知可回车): ")
     output_price = _read_optional_float("   输出价格 元/百万 tokens (未知可回车): ")
+    note = input("   备注 [可回车]: ").strip()
 
-    # 可选 API 验证
-    verify_choice = input("   要立即用 API 验证该模型吗？(y/n/skip) [默认 skip]: ").strip().lower()
-    verified_status = "unknown"
-    if verify_choice in ("y", "yes"):
-        api_key = get_env_value(api_key_env)
-        if not api_key:
-            console.print(f"   [bold yellow]未检测到 {api_key_env}，跳过验证。[/]")
-        else:
-            is_vis = (role == ROLE_VISION)
-            console.print(f"   [dim]正在验证 {model_id} ...[/]", end="")
-            status, error = verify_openai_chat_model(
-                model_id, api_key, base_url, is_vision=is_vis,
-            )
-            verified_status = "ok" if status == "ok" else "failed"
-            icon = "✅" if status == "ok" else "❌"
-            summary = (error or "OK")[:120].replace("\n", " ")
-            console.print(f" {icon} [{verified_status}] {summary}")
+    item = {
+        "name": name,
+        "provider": provider,
+        "base_url": base_url,
+        "api_key_env": api_key_env,
+        "model_id": model_id,
+        "roles": roles_raw,
+        "supports_vision": supports_vision,
+        "supports_thinking": None,
+        "input_price": input_price,
+        "output_price": output_price,
+        "note": note,
+    }
 
-    if role == ROLE_VISION:
-        return replace(
-            config,
-            vision_provider=provider,
-            model_vision=model_id,
-            vision_base_url=base_url,
-            vision_api_key_env=api_key_env,
-            vision_input_price_per_million=input_price,
-            vision_output_price_per_million=output_price,
-        )
-    return replace(
-        config,
-        brain_provider=provider,
-        model_brain=model_id,
-        brain_base_url=base_url,
-        brain_api_key_env=api_key_env,
-        brain_input_price_per_million=input_price,
-        brain_output_price_per_million=output_price,
+    verify_choice = input("   要立即验证该模型吗？(y/n) [默认 n]: ").strip().lower()
+    if verify_choice == "y":
+        item["verification"] = _verify_registry_item(console, item, role)
+
+    saved = upsert_third_party_model(config, item)
+    console.print(f"   [green]已保存第三方模型: {saved['name']}[/]")
+    return saved
+
+
+def _bulk_import_third_party_models(console, config: AppConfig, role: str):
+    console.print("\n[bold]批量导入第三方模型[/]")
+    provider, base_url, api_key_env = _read_custom_provider(console, config, role)
+    default_roles = input(f"   默认角色 (vision/brain/both) [默认 {role}]: ").strip() or role
+    console.print("   [dim]请输入 JSON 数组，或每行一个模型：model_id, 名称, roles, input_price, output_price[/]")
+    console.print("   [dim]输入空行结束。[/]")
+    lines = []
+    while True:
+        line = input()
+        if not line.strip():
+            break
+        lines.append(line)
+    parsed = parse_bulk_models_text(
+        "\n".join(lines),
+        defaults={
+            "provider": provider,
+            "base_url": base_url,
+            "api_key_env": api_key_env,
+            "roles": default_roles,
+        },
     )
+    if not parsed:
+        console.print("   [yellow]没有解析出任何模型。[/]")
+        return
+    for item in parsed:
+        upsert_third_party_model(config, item)
+    console.print(f"   [green]已导入 {len(parsed)} 个第三方模型。[/]")
+
+
+def _discover_and_import_models(console, config: AppConfig, role: str):
+    console.print("\n[bold]自动发现 OpenAI-compatible 模型[/]")
+    provider = "openai_compatible"
+    default_base, default_env = _provider_defaults(provider, role, config)
+    base_url = input(f"   Base URL [默认 {default_base}]: ").strip() or default_base
+    api_key_env = input(f"   API Key 环境变量名 [默认 {default_env}]: ").strip() or default_env
+    if not get_env_value(api_key_env):
+        console.print(f"   [yellow]当前未检测到环境变量 {api_key_env}。[/]")
+        save_key = input("   是否现在粘贴 API Key 并保存到当前用户环境变量？(y/n) [默认 n]: ").strip().lower()
+        if save_key == "y":
+            _prompt_and_save_api_key(console, api_key_env, indent="   ")
+    api_key = get_env_value(api_key_env)
+    if not api_key:
+        console.print("   [yellow]没有 API Key，无法自动发现。[/]")
+        return None
+
+    try:
+        discovered = discover_openai_compatible_models(base_url, api_key)
+    except Exception as exc:
+        console.print(f"   [red]自动发现失败: {exc}[/]")
+        return None
+
+    if not discovered:
+        console.print("   [yellow]没有发现可导入的模型。[/]")
+        return None
+
+    console.print(f"   [green]发现 {len(discovered)} 个模型。[/]")
+    for index, item in enumerate(discovered, start=1):
+        roles = "/".join(item.get("roles") or [])
+        console.print(f"     [{index}] {item['model_id']} roles={roles}")
+    choice = input("   输入要导入的编号（逗号分隔，a=全部，回车取消）: ").strip().lower()
+    if not choice:
+        return None
+    if choice == "a":
+        selected = discovered
+    else:
+        selected = []
+        try:
+            indexes = [int(part.strip()) for part in choice.split(",") if part.strip()]
+        except ValueError:
+            console.print("   [yellow]编号格式无效。[/]")
+            return None
+        for index in indexes:
+            if 1 <= index <= len(discovered):
+                selected.append(discovered[index - 1])
+    if not selected:
+        console.print("   [yellow]没有选中任何模型。[/]")
+        return None
+
+    for item in selected:
+        item["api_key_env"] = api_key_env
+        upsert_third_party_model(config, item)
+    console.print(f"   [green]已导入 {len(selected)} 个模型。[/]")
+
+    use_now = input("   是否立刻从已导入模型中选一个用于当前步骤？(y/n) [默认 y]: ").strip().lower()
+    if use_now == "n":
+        return None
+    return _select_third_party_model(console, config, role)
+
+
+def _edit_third_party_model(console, config: AppConfig):
+    items = load_third_party_models(config)
+    if not items:
+        console.print("[yellow]没有可编辑的第三方模型。[/]")
+        return
+    for index, item in enumerate(items, start=1):
+        console.print(f"  [{index}] {item['name']} -> {item['model_id']}")
+    selected = input("   输入要编辑的编号 [回车取消]: ").strip()
+    if not selected:
+        return
+    try:
+        index = int(selected)
+    except ValueError:
+        console.print("[yellow]编号无效。[/]")
+        return
+    if not 1 <= index <= len(items):
+        console.print("[yellow]编号超出范围。[/]")
+        return
+
+    item = dict(items[index - 1])
+    item["name"] = input(f"   名称 [当前 {item['name']}]: ").strip() or item["name"]
+    item["model_id"] = input(f"   模型 ID [当前 {item['model_id']}]: ").strip() or item["model_id"]
+    item["base_url"] = input(f"   Base URL [当前 {item['base_url']}]: ").strip() or item["base_url"]
+    item["api_key_env"] = input(f"   API Key 环境变量名 [当前 {item['api_key_env']}]: ").strip() or item["api_key_env"]
+    roles_default = "/".join(item.get("roles") or []) or ROLE_BRAIN
+    item["roles"] = input(f"   roles [当前 {roles_default}]: ").strip() or roles_default
+    new_input = input(f"   输入价格 [当前 {item.get('input_price')}]: ").strip()
+    if new_input:
+        item["input_price"] = _safe_float_from_text(new_input)
+    new_output = input(f"   输出价格 [当前 {item.get('output_price')}]: ").strip()
+    if new_output:
+        item["output_price"] = _safe_float_from_text(new_output)
+    item["note"] = input(f"   备注 [当前 {item.get('note', '')}]: ").strip() or item.get("note", "")
+    item["supports_vision"] = _ask_supports_vision_from_current(item.get("supports_vision"))
+
+    verify_choice = input("   是否重新验证该模型？(y/n) [默认 n]: ").strip().lower()
+    if verify_choice == "y":
+        role = ROLE_VISION if ROLE_VISION in (item.get("roles") or []) else ROLE_BRAIN
+        item["verification"] = _verify_registry_item(console, item, role)
+
+    upsert_third_party_model(config, item)
+    console.print("   [green]已更新。[/]")
+
+
+def _delete_third_party_model(console, config: AppConfig):
+    items = load_third_party_models(config)
+    if not items:
+        console.print("[yellow]没有可删除的第三方模型。[/]")
+        return
+    for index, item in enumerate(items, start=1):
+        console.print(f"  [{index}] {item['name']} -> {item['model_id']}")
+    selected = input("   输入要删除的编号 [回车取消]: ").strip()
+    if not selected:
+        return
+    try:
+        index = int(selected)
+    except ValueError:
+        console.print("[yellow]编号无效。[/]")
+        return
+    if not 1 <= index <= len(items):
+        console.print("[yellow]编号超出范围。[/]")
+        return
+    item = items[index - 1]
+    confirm = input(f"   确认删除 {item['name']} ? (y/n) [默认 n]: ").strip().lower()
+    if confirm != "y":
+        return
+    delete_third_party_model(config, item["id"])
+    console.print("   [green]已删除。[/]")
+
+
+def _verify_registry_item(console, item: Dict, role: str):
+    api_key_env = item.get("api_key_env") or "OPENAI_API_KEY"
+    api_key = get_env_value(api_key_env)
+    if not api_key:
+        console.print(f"   [yellow]未检测到 {api_key_env}，跳过验证。[/]")
+        return {}
+    base_url = item.get("base_url") or ""
+    is_vision = role == ROLE_VISION or bool(item.get("supports_vision"))
+    console.print(f"   [dim]正在验证 {item.get('model_id')} ...[/]", end="")
+    status, error = verify_openai_chat_model(
+        item.get("model_id") or "",
+        api_key,
+        base_url,
+        is_vision=is_vision,
+    )
+    icon = "✅" if status == "ok" else "❌"
+    summary = (error or "OK")[:120].replace("\n", " ")
+    console.print(f" {icon} [{status}] {summary}")
+    return {
+        "vision" if is_vision else "text": "ok" if status == "ok" else "failed"
+    }
 
 
 def _read_custom_provider(console, config: AppConfig, role: str):
@@ -372,8 +674,6 @@ def _prompt_and_save_api_key(console, env_name: str, indent: str = ""):
         )
 
 
-# ---- 以下函数保持不变（兼容旧 ModelSpec 的路径） ----
-
 def load_model_settings(config: AppConfig):
     if not config.model_settings_path.exists():
         return None
@@ -430,6 +730,52 @@ def _read_optional_float(prompt):
         return float(raw)
     except ValueError:
         return None
+
+
+def _safe_float_from_text(raw: str):
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _ask_supports_vision(role: str):
+    if role == ROLE_VISION:
+        default = "y"
+    else:
+        default = "n"
+    answer = input(f"   是否支持图片输入？(y/n/unknown) [默认 {default}]: ").strip().lower()
+    if not answer:
+        answer = default
+    if answer in ("y", "yes"):
+        return True
+    if answer in ("n", "no"):
+        return False
+    return None
+
+
+def _ask_supports_vision_from_current(current):
+    default = "unknown"
+    if current is True:
+        default = "y"
+    elif current is False:
+        default = "n"
+    answer = input(f"   是否支持图片输入？(y/n/unknown) [默认 {default}]: ").strip().lower()
+    if not answer:
+        answer = default
+    if answer in ("y", "yes"):
+        return True
+    if answer in ("n", "no"):
+        return False
+    return None
+
+
+def _format_registry_price(item: Dict):
+    inp = item.get("input_price")
+    out = item.get("output_price")
+    if inp is None and out is None:
+        return "[价格未知]"
+    return f"[¥{inp if inp is not None else '?'} / ¥{out if out is not None else '?'}]"
 
 
 def get_configured_price(config: AppConfig, role: str):
