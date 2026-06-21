@@ -63,7 +63,7 @@ def render_block(block: Dict[str, Any]) -> str:
     if block_type == "table":
         return _render_table(text)
     if block_type == "formula_block":
-        return _render_formula_block(text)
+        return _render_formula_block(block.get("latex") or text)
     if block_type == "figure_note":
         return _render_figure_note(block)
     if block_type == "image_ref":

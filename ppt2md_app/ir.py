@@ -3,6 +3,7 @@ import re
 from typing import Any, Dict, List
 
 from .figures import analyze_figure_description
+from .formula_quality import assess_formula_text
 from .renderer import (
     render_blocks_to_markdown,
     render_page_ir_to_markdown,
@@ -141,6 +142,12 @@ def _origin_for_type(block_type: str) -> str:
 def _extra_block_fields(block_type: str, text: str) -> Dict[str, Any]:
     if block_type == "figure_note":
         return analyze_figure_description(text).to_block_fields()
+    if block_type in {"formula_inline", "formula_block"}:
+        quality = assess_formula_text(text)
+        return {
+            "latex": quality.latex,
+            "formula_quality": quality.to_dict(),
+        }
     return {}
 
 

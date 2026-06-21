@@ -24,3 +24,13 @@ def test_merge_provenance_summaries_counts_refiner_ops():
     assert merged["origin_counts"]["refiner_op"] == 1
     assert merged["refiner_op_count"] == 1
     assert merged["type_counts"]["formula_block"] == 1
+
+
+def test_formula_provenance_records_latex_warning_count():
+    page_ir = build_page_ir("### Formula\n\\frac a}{b", 3)
+    provenance = build_page_provenance(page_ir)
+
+    entry = provenance["entries"][0]
+    assert entry["type"] == "formula_block"
+    assert entry["formula_warning_count"] == 1
+    assert entry["latex_sha256"]

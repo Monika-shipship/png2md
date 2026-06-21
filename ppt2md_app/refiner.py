@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 from .figures import analyze_figure_description
+from .formula_quality import assess_formula_text, normalize_formula_text
 from .renderer import render_page_ir_to_markdown
 from .validators import ValidationIssue, is_api_error_text, validate_slide_markdown
 
@@ -598,6 +599,7 @@ def _op_normalize_formula(page_ir: Dict[str, Any], block_id: str | None) -> bool
         return False
     block["text"] = normalized
     block["type"] = "formula_block"
+    _update_formula_fields(block)
     _mark_refiner_origin(block, "normalize_formula")
     return True
 
@@ -608,6 +610,12 @@ def _mark_refiner_origin(block: Dict[str, Any], op: str, *, before_ids: list[str
     if before_ids:
         evidence["before_block_ids"] = before_ids
     block["origin"] = "refiner_op"
+
+
+def _update_formula_fields(block: Dict[str, Any]):
+    quality = assess_formula_text(block.get("text") or "")
+    block["latex"] = quality.latex
+    block["formula_quality"] = quality.to_dict()
 
 
 def _find_block(blocks: List[Dict[str, Any]], block_id: str | None) -> Dict[str, Any] | None:
@@ -687,14 +695,7 @@ def _formula_needs_normalize(text: str) -> bool:
 
 
 def _normalize_formula_text(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("$$") and stripped.endswith("$$"):
-        stripped = stripped[2:-2].strip()
-    if stripped.startswith(r"\[") and stripped.endswith(r"\]"):
-        stripped = stripped[2:-2].strip()
-    if stripped.startswith(r"\(") and stripped.endswith(r"\)"):
-        stripped = stripped[2:-2].strip()
-    return stripped
+    return normalize_formula_text(text)
 
 
 def _has_uncertain_marker(text: str) -> bool:

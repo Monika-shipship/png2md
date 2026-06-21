@@ -128,11 +128,15 @@ def test_handwritten_sections_become_renderable_block_types():
         "| 量 | 值 |\n| --- | --- |\n| a | 1 |",
         "右下角被涂改。",
     ]
+    assert ir["blocks"][0]["latex"] == "F = ma"
+    assert ir["blocks"][0]["formula_quality"]["ok"] is True
 
 
 def test_uncertain_formula_renders_as_warning_block():
-    markdown = render_page_ir_to_markdown(build_page_ir("### Formula\nE = [?] mc^2", 8))
+    ir = build_page_ir("### Formula\nE = [?] mc^2", 8)
+    markdown = render_page_ir_to_markdown(ir)
 
+    assert ir["blocks"][0]["formula_quality"]["warnings"][0]["code"] == "formula_uncertain_marker"
     assert markdown == (
         "# Slide 8\n\n"
         "> [!WARNING] 公式识别不确定\n"

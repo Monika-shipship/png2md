@@ -151,10 +151,10 @@ def summarize_blocks(blocks: Iterable[Dict[str, Any]] | None) -> Dict[str, Any]:
                     }
                 )
         elif block_type in {"formula_inline", "formula_block"}:
-            warning = _formula_block_warning(block.get("text") or "")
-            if warning:
+            warnings = _formula_block_warnings(block)
+            if warnings:
                 summary["formula_warning_count"] += 1
-                summary["warnings"].append(warning)
+                summary["warnings"].extend(warnings)
         elif block_type == "table":
             quality = assess_table(block.get("text") or "")
             if not quality.reliable:
@@ -207,7 +207,24 @@ def _sum_block_counts(pages: list[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
-def _formula_block_warning(text: str) -> Dict[str, Any] | None:
+def _formula_block_warnings(block: Dict[str, Any]) -> list[Dict[str, Any]]:
+    quality = block.get("formula_quality")
+    if isinstance(quality, dict):
+        warnings = quality.get("warnings") or []
+        return [
+            {
+                "code": warning.get("code"),
+                "message": warning.get("message"),
+                "latex": quality.get("latex"),
+            }
+            for warning in warnings
+            if isinstance(warning, dict)
+        ]
+    warning = _legacy_formula_block_warning(block.get("text") or "")
+    return [warning] if warning else []
+
+
+def _legacy_formula_block_warning(text: str) -> Dict[str, Any] | None:
     lower = (text or "").lower()
     if (
         "[?]" in text

@@ -109,7 +109,7 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
                 "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
                 "### Formula\n"
                 "$$\n"
-                "E = [?] mc^2\n"
+                "\\frac a}{b\n"
                 "$$\n\n"
                 "### Table Analysis\n"
                 "| A | B |\n"
@@ -161,6 +161,12 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     assert report["pages"][0]["stage1"]["blocks_count"] >= 1
     assert report["pages"][0]["block_refiner"]["changed"] is True
     assert report["pages"][0]["block_refiner"]["applied_ops"][0]["op"]["op"] == "normalize_formula"
+    formula_warnings = [
+        warning
+        for warning in report["pages"][0]["quality"]["warnings"]
+        if str(warning.get("code") or "").startswith("formula_") or str(warning.get("code") or "").startswith("latex_")
+    ]
+    assert {warning["code"] for warning in formula_warnings} == {"latex_frac_missing_braces"}
     assert report["pages"][0]["quality"]["figure_warning_count"] == 1
     assert report["pages"][0]["quality"]["table_warning_count"] == 1
     assert raw["blocks"]

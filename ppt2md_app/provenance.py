@@ -101,6 +101,10 @@ def _block_entry(block: Dict[str, Any], index: int) -> Dict[str, Any]:
         entry["figure_type"] = block.get("figure_type")
     elif block.get("type") == "formula_block":
         entry["formula_origin"] = block.get("origin")
+        quality = block.get("formula_quality") if isinstance(block.get("formula_quality"), dict) else {}
+        latex = block.get("latex") or quality.get("latex") or block.get("text") or ""
+        entry["latex_sha256"] = _sha256_text(latex) if latex else None
+        entry["formula_warning_count"] = len(quality.get("warnings") or [])
     elif block.get("type") == "table":
         entry["table_origin"] = block.get("origin")
     return entry

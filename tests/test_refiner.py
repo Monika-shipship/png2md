@@ -93,6 +93,8 @@ def test_block_refiner_normalizes_formula_and_is_idempotent():
     assert first.changed is True
     assert first.applied_ops[0]["op"]["op"] == "normalize_formula"
     assert first.page_ir["blocks"][0]["text"] == "E = mc^2"
+    assert first.page_ir["blocks"][0]["latex"] == "E = mc^2"
+    assert first.page_ir["blocks"][0]["formula_quality"]["ok"] is True
     assert render_page_ir_to_markdown(first.page_ir) == "# Slide 2\n\n$$\nE = mc^2\n$$\n"
     assert second.changed is False
     assert second.applied_ops == []
