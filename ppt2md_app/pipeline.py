@@ -143,6 +143,7 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
                     if valid:
                         raw_data_map[actual_slide_no] = data["raw_text"]
                         page["quality"] = summarize_blocks(data.get("blocks") or [])
+                        page["provenance"] = data.get("provenance") or page.get("provenance")
                         page["block_refiner"] = data.get("block_refiner") or page.get("block_refiner")
                         page["stage1"].update(
                             {
@@ -194,6 +195,7 @@ def _run_vision_stage(ppt_name, target_images, start_idx, temp_dir, task_id, msg
                     cache_record = build_raw_cache_record(result, img_path, config)
                     write_json(raw_file, cache_record)
                     page["quality"] = summarize_blocks(cache_record.get("blocks") or [])
+                    page["provenance"] = cache_record.get("provenance") or page.get("provenance")
                     page["block_refiner"] = cache_record.get("block_refiner") or page.get("block_refiner")
                     page["stage1"].update(
                         {

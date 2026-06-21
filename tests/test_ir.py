@@ -41,6 +41,17 @@ def test_golden_renderer_fixture():
     assert render_page_ir_to_markdown(build_page_ir(raw, 7)) == expected
 
 
+def test_renderer_provenance_comments_are_opt_in():
+    ir = build_page_ir("标题:\n\n正文。", 12)
+
+    default_markdown = render_page_ir_to_markdown(ir)
+    debug_markdown = render_page_ir_to_markdown(ir, include_provenance_comments=True)
+
+    assert "png2md-provenance" not in default_markdown
+    assert "<!-- png2md-provenance id=p0012-b001 type=heading origin=vision_ocr source_page=12" in debug_markdown
+    assert "<!-- png2md-provenance id=p0012-b002 type=paragraph origin=vision_ocr source_page=12" in debug_markdown
+
+
 def test_figure_analysis_extracts_structured_fields():
     raw = (
         "### Figure Analysis\n"

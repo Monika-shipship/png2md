@@ -1,33 +1,51 @@
 from typing import Any, Dict, List
 
+from .provenance import provenance_comment
 from .table_quality import assess_table_markdown
 
 
 RENDERER_VERSION = "markdown-first-renderer-2026-06-21"
 
 
-def render_page_ir_to_markdown(page_ir: Dict[str, Any], slide_no: int | None = None) -> str:
+def render_page_ir_to_markdown(
+    page_ir: Dict[str, Any],
+    slide_no: int | None = None,
+    *,
+    include_provenance_comments: bool = False,
+) -> str:
     slide = slide_no or page_ir.get("source_page") or 0
     blocks = page_ir.get("blocks") or []
     if blocks:
-        return render_blocks_to_markdown(blocks, slide)
+        return render_blocks_to_markdown(blocks, slide, include_provenance_comments=include_provenance_comments)
     raw_text = page_ir.get("raw_text") or ""
     return render_raw_text_fallback(raw_text, slide)
 
 
-def render_page_record_to_markdown(record: Dict[str, Any], slide_no: int | None = None) -> str:
+def render_page_record_to_markdown(
+    record: Dict[str, Any],
+    slide_no: int | None = None,
+    *,
+    include_provenance_comments: bool = False,
+) -> str:
     slide = slide_no or record.get("slide_no") or record.get("page_ir", {}).get("source_page") or 0
     blocks = record.get("blocks") or record.get("page_ir", {}).get("blocks") or []
     if blocks:
-        return render_blocks_to_markdown(blocks, slide)
+        return render_blocks_to_markdown(blocks, slide, include_provenance_comments=include_provenance_comments)
     return render_raw_text_fallback(record.get("raw_text") or "", slide)
 
 
-def render_blocks_to_markdown(blocks: List[Dict[str, Any]], slide_no: int) -> str:
+def render_blocks_to_markdown(
+    blocks: List[Dict[str, Any]],
+    slide_no: int,
+    *,
+    include_provenance_comments: bool = False,
+) -> str:
     chunks = [f"# Slide {slide_no}"]
     for block in blocks:
         rendered = render_block(block)
         if rendered:
+            if include_provenance_comments:
+                rendered = f"{provenance_comment(block)}\n{rendered}"
             chunks.append(rendered)
     return "\n\n".join(chunks).rstrip() + "\n"
 

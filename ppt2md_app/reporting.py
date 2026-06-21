@@ -8,6 +8,7 @@ from .artifacts import (
     report_prompt_identity,
 )
 from .config import AppConfig
+from .provenance import merge_provenance_summaries
 from .table_quality import assess_table_markdown
 from .versioning import PNG2MD_PIPELINE_VERSION
 
@@ -30,6 +31,7 @@ def build_run_report(
                 "stage2": _stage_state(),
                 "validation": {"ok": None, "errors": [], "warnings": []},
                 "quality": _empty_quality_summary(),
+                "provenance": {"schema_version": None, "entries": [], "summary": {}},
                 "block_refiner": {"version": None, "changed": False, "applied_ops": [], "dismissed": [], "validation": None},
                 "refiner": {"changed": False, "applied_ops": [], "dismissed": []},
                 "final": {
@@ -79,6 +81,7 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
         for page in pages
     )
     block_counts = _sum_block_counts(pages)
+    provenance_summary = merge_provenance_summaries(pages)
 
     report["summary"] = {
         "pages_total": len(pages),
@@ -91,6 +94,7 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
         "block_refiner_changed_pages": sum(1 for page in pages if page.get("block_refiner", {}).get("changed")),
         "block_refiner_applied_ops": block_refiner_applied_ops,
         "block_counts": block_counts,
+        "provenance": provenance_summary,
         "uncertain_block_count": block_counts.get("uncertain", 0),
         "figure_count": block_counts.get("figure_note", 0),
         "figure_warning_count": sum(int(page.get("quality", {}).get("figure_warning_count") or 0) for page in pages),

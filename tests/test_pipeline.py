@@ -146,6 +146,11 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     assert report["summary"]["block_refiner_changed_pages"] == 1
     assert report["summary"]["block_refiner_applied_ops"] == 1
     assert report["summary"]["block_counts"]["formula_block"] == 1
+    assert report["summary"]["provenance"]["origin_counts"]["vision_ocr"] == 1
+    assert report["summary"]["provenance"]["origin_counts"]["refiner_op"] == 1
+    assert report["summary"]["provenance"]["origin_counts"]["vision_table"] == 1
+    assert report["summary"]["provenance"]["origin_counts"]["vision_description"] == 1
+    assert report["summary"]["provenance"]["generated_description_count"] == 1
     assert report["summary"]["figure_count"] == 1
     assert report["summary"]["figure_warning_count"] == 1
     assert report["summary"]["formula_warning_count"] == 1
@@ -156,5 +161,6 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     assert report["pages"][0]["quality"]["figure_warning_count"] == 1
     assert report["pages"][0]["quality"]["table_warning_count"] == 1
     assert raw["blocks"]
+    assert raw["provenance"]["summary"]["origin_counts"]["refiner_op"] == 1
     assert raw["block_refiner"]["applied_ops"][0]["after_block_ids"]
     assert "# Slide 1" in (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
