@@ -2,7 +2,13 @@ import hashlib
 import re
 from typing import Any, Dict, List
 
-PAGE_IR_SCHEMA_VERSION = 1
+from .renderer import (
+    render_blocks_to_markdown,
+    render_page_ir_to_markdown,
+    render_page_record_to_markdown,
+)
+
+PAGE_IR_SCHEMA_VERSION = 2
 
 
 def build_page_ir(raw_text: str, slide_no: int) -> Dict[str, Any]:
@@ -24,57 +30,29 @@ def raw_text_to_blocks(raw_text: str, slide_no: int) -> List[Dict[str, Any]]:
     paragraphs = _split_paragraphs(text)
     blocks = []
     for paragraph in paragraphs:
-        block_type = _infer_block_type(paragraph)
+        block_type = _section_block_type(paragraph) or _infer_block_type(_strip_section_heading(paragraph))
+        block_text = _strip_section_heading(paragraph)
+        if not block_text:
+            continue
         blocks.append(
             {
                 "id": f"p{slide_no:04d}-b{len(blocks) + 1:03d}",
                 "type": block_type,
-                "text": paragraph,
+                "text": block_text,
                 "source_page": slide_no,
                 "confidence": _confidence_for_type(block_type),
-                "origin": "stage1_raw",
+                "origin": _origin_for_type(block_type),
+                "evidence": {"raw_text": paragraph},
+                "bbox": None,
             }
         )
     return blocks
 
 
-def render_page_ir_to_markdown(page_ir: Dict[str, Any], slide_no: int | None = None) -> str:
-    slide = slide_no or page_ir.get("source_page") or 0
-    blocks = page_ir.get("blocks") or []
-    if blocks:
-        return render_blocks_to_markdown(blocks, slide)
-    raw_text = page_ir.get("raw_text") or ""
-    return _render_raw_text_fallback(raw_text, slide)
-
-
-def render_page_record_to_markdown(record: Dict[str, Any], slide_no: int | None = None) -> str:
-    slide = slide_no or record.get("slide_no") or record.get("page_ir", {}).get("source_page") or 0
-    blocks = record.get("blocks") or record.get("page_ir", {}).get("blocks") or []
-    if blocks:
-        return render_blocks_to_markdown(blocks, slide)
-    return _render_raw_text_fallback(record.get("raw_text") or "", slide)
-
-
-def render_blocks_to_markdown(blocks: List[Dict[str, Any]], slide_no: int) -> str:
-    chunks = [f"# Slide {slide_no}"]
-    for block in blocks:
-        text = (block.get("text") or "").strip()
-        if not text:
-            continue
-        block_type = block.get("type")
-        if block_type == "heading":
-            chunks.append(f"## {_strip_heading_marks(text)}")
-        elif block_type == "figure":
-            chunks.append(_render_figure_note(text))
-        else:
-            chunks.append(text)
-    return "\n\n".join(chunks).rstrip() + "\n"
-
-
 def _split_paragraphs(text: str) -> List[str]:
     paragraphs = []
     current = []
-    in_figure = False
+    in_section = False
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -82,18 +60,18 @@ def _split_paragraphs(text: str) -> List[str]:
             if current:
                 paragraphs.append("\n".join(current).strip())
                 current = []
-            in_figure = False
+            in_section = False
             continue
 
-        if stripped.lower().startswith("### figure analysis"):
+        if _is_section_heading(stripped):
             if current:
                 paragraphs.append("\n".join(current).strip())
                 current = []
             current.append(stripped)
-            in_figure = True
+            in_section = True
             continue
 
-        if in_figure:
+        if in_section:
             current.append(stripped)
             continue
 
@@ -117,49 +95,92 @@ def _split_paragraphs(text: str) -> List[str]:
 def _infer_block_type(text: str) -> str:
     stripped = text.strip()
     lower = stripped.lower()
-    if lower.startswith("### figure analysis"):
-        return "figure"
     if re.match(r"^#{1,6}\s+", stripped) or (len(stripped) <= 80 and stripped.endswith(":")):
         return "heading"
     if all(_is_list_line(line.strip()) for line in stripped.splitlines() if line.strip()):
         return "list"
-    if "$$" in stripped or re.search(r"\\\(|\\\[|[$][^$]+[$]", stripped):
-        return "formula"
+    if re.search(r"\\\(|\\\[|[$][^$]+[$]", stripped):
+        return "formula_inline"
+    if _looks_like_formula_block(stripped):
+        return "formula_block"
     if "|" in stripped and "\n" in stripped:
         return "table"
-    return "text"
+    return "paragraph"
 
 
 def _confidence_for_type(block_type: str) -> float:
-    if block_type in {"figure", "list"}:
+    if block_type in {"figure_note", "list"}:
         return 0.72
-    if block_type in {"heading", "formula", "table"}:
+    if block_type in {"heading", "formula_inline", "formula_block", "table"}:
         return 0.62
+    if block_type == "uncertain":
+        return 0.25
     return 0.55
+
+
+def _origin_for_type(block_type: str) -> str:
+    if block_type in {"formula_inline", "formula_block"}:
+        return "vision_formula"
+    if block_type == "figure_note":
+        return "vision_description"
+    if block_type == "uncertain":
+        return "vision_uncertain"
+    if block_type == "table":
+        return "vision_table"
+    return "vision_ocr"
 
 
 def _is_list_line(line: str) -> bool:
     return bool(re.match(r"^([-*+]\s+|\d+[.)]\s+)", line))
 
 
-def _strip_heading_marks(text: str) -> str:
-    return re.sub(r"^#{1,6}\s+", "", text.strip()).rstrip(":").strip()
+def _is_section_heading(line: str) -> bool:
+    lower = line.lower()
+    return (
+        lower.startswith("### ocr text")
+        or lower.startswith("### ocr")
+        or lower.startswith("### 正文")
+        or lower.startswith("### figure analysis")
+        or lower.startswith("### formula")
+        or lower.startswith("### table analysis")
+        or lower.startswith("### uncertain")
+        or lower.startswith("### illegible")
+        or lower.startswith("### 公式")
+        or lower.startswith("### 表格")
+        or lower.startswith("### 不确定")
+    )
 
 
-def _render_figure_note(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if lines and lines[0].lower().startswith("### figure analysis"):
+def _section_block_type(text: str) -> str | None:
+    first = (text.strip().splitlines() or [""])[0].strip().lower()
+    if first.startswith("### figure analysis"):
+        return "figure_note"
+    if first.startswith("### formula") or first.startswith("### 公式"):
+        return "formula_block"
+    if first.startswith("### table analysis") or first.startswith("### 表格"):
+        return "table"
+    if first.startswith("### uncertain") or first.startswith("### illegible") or first.startswith("### 不确定"):
+        return "uncertain"
+    return None
+
+
+def _strip_section_heading(text: str) -> str:
+    lines = text.strip().splitlines()
+    if lines and _is_section_heading(lines[0].strip()):
         lines = lines[1:]
-    if not lines:
-        return "> [!NOTE] Figure 描述"
-    return "> [!NOTE] Figure 描述\n" + "\n".join(f"> {line}" for line in lines)
+    return "\n".join(line.strip() for line in lines).strip()
 
 
-def _render_raw_text_fallback(raw_text: str, slide_no: int) -> str:
-    text = (raw_text or "").strip()
-    if not text:
-        return f"# Slide {slide_no}\n"
-    return f"# Slide {slide_no}\n\n{text}\n"
+def _looks_like_formula_block(text: str) -> bool:
+    stripped = text.strip()
+    if "$$" in stripped:
+        return True
+    if re.search(r"[\u4e00-\u9fff]", stripped):
+        return False
+    if len(stripped.splitlines()) <= 3 and re.search(r"(\\frac|\\sum|\\int|\\lim|\\begin\{|=|≈|≤|≥)", stripped):
+        math_chars = sum(1 for ch in stripped if ch in "=+-*/^_{}\\")
+        return math_chars >= 2
+    return False
 
 
 def _sha256_text(text: str) -> str:

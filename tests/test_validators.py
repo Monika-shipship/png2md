@@ -63,3 +63,14 @@ def test_figure_analysis_without_note_warns():
 
     assert result.ok
     assert [issue.code for issue in result.warnings] == ["figure_note_missing"]
+
+
+def test_chinese_figure_note_satisfies_figure_analysis():
+    result = validate_slide_markdown(
+        "# Slide 1\n\n> [!NOTE] 图示说明\n> 图中左侧是 A。\n",
+        1,
+        target_raw="### Figure Analysis\n图中左侧是 A。",
+    )
+
+    assert result.ok
+    assert result.warnings == []

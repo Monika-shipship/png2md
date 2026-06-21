@@ -1,7 +1,19 @@
+### OCR Text
 标题:
 
 这是一页正文 $E=mc^2$。
 
+### Formula
+F = ma
+
 ### Figure Analysis
 左侧是 A。
 右侧是 B。
+
+### Table Analysis
+| 物理量 | 单位 |
+| --- | --- |
+| 力 | N |
+
+### Uncertain
+右下角有一处被涂改的手写字，无法确定。

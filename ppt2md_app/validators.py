@@ -134,7 +134,7 @@ def validate_slide_markdown(
     if "### Figure Analysis" in text:
         warnings.append(_issue("unrendered_figure_analysis", "warning", "Figure Analysis 未整理为 Figure 描述引用块。", slide_no))
 
-    if target_raw and "### Figure Analysis" in target_raw and "> [!NOTE] Figure 描述" not in text:
+    if target_raw and "### Figure Analysis" in target_raw and not _has_figure_note(text):
         warnings.append(_issue("figure_note_missing", "warning", "当前页 Raw Data 含 Figure Analysis，但输出没有 Figure 描述引用块。", slide_no))
 
     leak_evidence = _find_possible_neighbor_leak(text, target_raw or "", neighbor_raw or {})
@@ -174,6 +174,10 @@ def _fence_count(text: str) -> int:
 def _strip_code_regions(text: str) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     return re.sub(r"`[^`\n]*`", "", text)
+
+
+def _has_figure_note(text: str) -> bool:
+    return "> [!NOTE] Figure 描述" in text or "> [!NOTE] 图示说明" in text
 
 
 def _find_possible_neighbor_leak(markdown: str, target_raw: str, neighbor_raw: dict[int, str]) -> str | None:
