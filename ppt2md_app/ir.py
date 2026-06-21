@@ -8,8 +8,9 @@ from .renderer import (
     render_page_ir_to_markdown,
     render_page_record_to_markdown,
 )
+from .table_quality import is_probably_aligned_text_table
 
-PAGE_IR_SCHEMA_VERSION = 4
+PAGE_IR_SCHEMA_VERSION = 5
 
 
 def build_page_ir(raw_text: str, slide_no: int) -> Dict[str, Any]:
@@ -100,12 +101,16 @@ def _infer_block_type(text: str) -> str:
         return "heading"
     if all(_is_list_line(line.strip()) for line in stripped.splitlines() if line.strip()):
         return "list"
+    if "|" in stripped and "\n" in stripped:
+        return "table"
+    if re.search(r"<table\b", stripped, flags=re.IGNORECASE):
+        return "table"
+    if is_probably_aligned_text_table(stripped):
+        return "table"
     if re.search(r"\\\(|\\\[|[$][^$]+[$]", stripped):
         return "formula_inline"
     if _looks_like_formula_block(stripped):
         return "formula_block"
-    if "|" in stripped and "\n" in stripped:
-        return "table"
     return "paragraph"
 
 

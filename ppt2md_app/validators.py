@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from .table_quality import assess_table_markdown
+from .table_quality import assess_table
 
 
 Severity = Literal["error", "warning"]
@@ -210,7 +210,7 @@ def _formula_quality_warnings(text: str, slide_no: int) -> list[ValidationIssue]
 def _table_quality_warnings(text: str, slide_no: int) -> list[ValidationIssue]:
     warnings = []
     for table_text in _markdown_table_candidates(text):
-        quality = assess_table_markdown(table_text)
+        quality = assess_table(table_text)
         if quality.reliable:
             continue
         issue_codes = [issue.code for issue in quality.errors + quality.warnings]

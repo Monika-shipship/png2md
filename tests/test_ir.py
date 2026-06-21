@@ -6,7 +6,7 @@ from ppt2md_app.ir import build_page_ir, render_blocks_to_markdown, render_page_
 def test_build_page_ir_creates_stable_blocks():
     ir = build_page_ir("标题:\n\n- a\n- b\n\n### Figure Analysis\n左侧是 A。\n", 3)
 
-    assert ir["schema_version"] == 4
+    assert ir["schema_version"] == 5
     assert [block["id"] for block in ir["blocks"]] == ["p0003-b001", "p0003-b002", "p0003-b003"]
     assert [block["type"] for block in ir["blocks"]] == ["heading", "list", "figure_note"]
     assert [block["text"] for block in ir["blocks"]] == ["标题:", "- a\n- b", "左侧是 A。"]
@@ -148,6 +148,35 @@ def test_unreliable_table_degrades_to_warning_block():
     assert markdown.startswith("# Slide 9\n\n> [!WARNING] 表格识别不确定\n")
     assert "Markdown 表格行列数不一致" in markdown
     assert "> | 1 | 2 | 3 |" in markdown
+
+
+def test_aligned_text_table_renders_as_markdown_table():
+    ir = build_page_ir("Name    Value\nForce   N\nMass    kg", 13)
+
+    markdown = render_page_ir_to_markdown(ir)
+
+    assert ir["blocks"][0]["type"] == "table"
+    assert markdown == (
+        "# Slide 13\n\n"
+        "| Name | Value |\n"
+        "| --- | --- |\n"
+        "| Force | N |\n"
+        "| Mass | kg |\n"
+    )
+
+
+def test_simple_html_table_renders_as_markdown_table():
+    raw = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    markdown = render_page_ir_to_markdown(build_page_ir(raw, 14))
+
+    assert markdown == "# Slide 14\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+
+
+def test_complex_html_table_is_preserved_inside_markdown():
+    raw = "<table><tr><th colspan=\"2\">A</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    markdown = render_page_ir_to_markdown(build_page_ir(raw, 15))
+
+    assert markdown == f"# Slide 15\n\n{raw}\n"
 
 
 def test_render_page_record_falls_back_to_raw_text_when_blocks_missing():

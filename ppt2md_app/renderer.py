@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 
 from .provenance import provenance_comment
-from .table_quality import assess_table_markdown
+from .table_quality import assess_table, normalize_table_text
 
 
 RENDERER_VERSION = "markdown-first-renderer-2026-06-21"
@@ -126,9 +126,9 @@ def _render_uncertain_formula(text: str) -> str:
 
 def _render_table(text: str) -> str:
     stripped = _strip_known_section_heading(text)
-    quality = assess_table_markdown(stripped)
+    quality = assess_table(stripped)
     if quality.reliable:
-        return stripped
+        return normalize_table_text(stripped)
 
     issue_lines = [issue.message for issue in quality.errors + quality.warnings]
     rendered = ["> [!WARNING] 表格识别不确定"]

@@ -9,7 +9,7 @@ from .artifacts import (
 )
 from .config import AppConfig
 from .provenance import merge_provenance_summaries
-from .table_quality import assess_table_markdown
+from .table_quality import assess_table
 from .versioning import PNG2MD_PIPELINE_VERSION
 
 
@@ -154,7 +154,7 @@ def summarize_blocks(blocks: Iterable[Dict[str, Any]] | None) -> Dict[str, Any]:
                 summary["formula_warning_count"] += 1
                 summary["warnings"].append(warning)
         elif block_type == "table":
-            quality = assess_table_markdown(block.get("text") or "")
+            quality = assess_table(block.get("text") or "")
             if not quality.reliable:
                 summary["table_warning_count"] += 1
                 summary["warnings"].append(
