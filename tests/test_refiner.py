@@ -104,8 +104,10 @@ def test_block_refiner_normalizes_formula_and_is_idempotent():
 
 def test_block_refiner_promotes_heading_and_marks_uncertain_without_markdown_patch():
     page_ir = {
-        "schema_version": 4,
+        "schema_version": 7,
         "source_page": 3,
+        "raw_text": "定义:\n\n右下角有 [?] 看不清。",
+        "raw_text_sha256": "d5c1a1a38f821cf9d2d0f73ef5a19334ff1a3ec474e46c7b7002a3edada5a203",
         "blocks": [
             {
                 "id": "p0003-b001",
@@ -345,3 +347,51 @@ def test_block_op_checked_rejects_refiner_block_without_refiner_op_evidence():
     assert refined == page_ir
     assert detail["reason"] == "page_ir_contract_failed"
     assert "block_1_missing_refiner_op_evidence" in detail["errors"]
+
+
+def test_block_op_checked_rejects_page_ir_missing_raw_text():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 15)
+    del page_ir["raw_text"]
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0015-b001"},
+        slide_no=15,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "raw_text_missing" in detail["errors"]
+
+
+def test_block_op_checked_rejects_page_ir_missing_raw_text_hash():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 16)
+    del page_ir["raw_text_sha256"]
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0016-b001"},
+        slide_no=16,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "raw_text_sha256_missing" in detail["errors"]
+
+
+def test_block_op_checked_rejects_page_ir_raw_text_hash_mismatch():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 17)
+    page_ir["raw_text_sha256"] = "bad"
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0017-b001"},
+        slide_no=17,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "raw_text_sha256_mismatch" in detail["errors"]

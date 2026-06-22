@@ -673,12 +673,16 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any]) -> list[str]:
     if not isinstance(page_ir, dict):
         return ["page_ir_not_dict"]
     raw_text = page_ir.get("raw_text")
-    if raw_text is not None and not isinstance(raw_text, str):
+    if "raw_text" not in page_ir:
+        errors.append("raw_text_missing")
+    elif not isinstance(raw_text, str):
         errors.append("raw_text_not_string")
-    if isinstance(raw_text, str):
-        expected = page_ir.get("raw_text_sha256")
-        if expected and expected != _sha256_text(raw_text):
-            errors.append("raw_text_sha256_mismatch")
+    if "raw_text_sha256" not in page_ir:
+        errors.append("raw_text_sha256_missing")
+    elif not isinstance(page_ir.get("raw_text_sha256"), str):
+        errors.append("raw_text_sha256_not_string")
+    elif isinstance(raw_text, str) and page_ir.get("raw_text_sha256") != _sha256_text(raw_text):
+        errors.append("raw_text_sha256_mismatch")
     blocks = page_ir.get("blocks")
     if not isinstance(blocks, list):
         return ["blocks_not_list"]
