@@ -13,11 +13,12 @@ from .prompts import (
 )
 from .provenance import PROVENANCE_SCHEMA_VERSION, build_page_provenance
 from .refiner import BLOCK_REFINER_VERSION, refine_page_ir
+from .renderer import RENDERER_VERSION
 from .versioning import PNG2MD_PIPELINE_VERSION
 
 
 RAW_CACHE_SCHEMA_VERSION = 1
-SLIDE_META_SCHEMA_VERSION = 1
+SLIDE_META_SCHEMA_VERSION = 2
 RUN_REPORT_SCHEMA_VERSION = 1
 
 
@@ -133,6 +134,11 @@ def build_slide_meta(
         "markdown_sha256": sha256_text(markdown),
         "validation": validation,
         "refiner": refiner or {"changed": False, "applied_ops": [], "dismissed": []},
+        "markdown_source": {
+            "kind": "brain_refine",
+            "source": "stage2_brain",
+            "refiner_changed": bool((refiner or {}).get("changed")),
+        },
         "error": None,
         "metadata": {
             "created_at": now_iso(),
@@ -167,6 +173,12 @@ def build_fail_open_slide_meta(
         "markdown_sha256": sha256_text(markdown),
         "validation": validation,
         "refiner": {"changed": False, "applied_ops": [], "dismissed": []},
+        "markdown_source": {
+            "kind": fallback_source,
+            "source": "deterministic_renderer",
+            "renderer_version": RENDERER_VERSION,
+            "fallback": True,
+        },
         "error": {"code": code, "message": message},
         "fallback": {
             "source": fallback_source,
@@ -247,6 +259,9 @@ def validate_slide_meta(
         return False, "legacy_miss"
     if meta.get("status") != "ok":
         return False, "invalid"
+    markdown_source = meta.get("markdown_source")
+    if not isinstance(markdown_source, dict) or not markdown_source.get("kind"):
+        return False, "legacy_miss"
     if meta.get("slide_no") != slide_no:
         return False, "invalid"
     if meta.get("markdown_sha256") != sha256_text(markdown):

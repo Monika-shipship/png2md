@@ -323,7 +323,13 @@ def _run_brain_stage(
                                     "elapsed_seconds": 0.0,
                                 }
                             )
-                            page["final"].update({"status": "ok", "reason": None})
+                            page["final"].update(
+                                {
+                                    "status": "ok",
+                                    "reason": None,
+                                    "markdown_source": meta.get("markdown_source"),
+                                }
+                            )
                             msg_queue.put(("advance", task_id, 1))
                             skipped += 1
                             ok_slides.append(actual_slide_no)
@@ -439,7 +445,13 @@ def _run_brain_stage(
                             "elapsed_seconds": round(perf_counter() - started_at, 3),
                         }
                     )
-                    page["final"].update({"status": "ok", "reason": None})
+                    page["final"].update(
+                        {
+                            "status": "ok",
+                            "reason": None,
+                            "markdown_source": meta.get("markdown_source"),
+                        }
+                    )
                     ok_slides.append(slide_no)
                     msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组完成"))
                 else:
@@ -553,20 +565,18 @@ def _write_stage2_fail_open_markdown(
 
     output_path = ppt_root / f"Slide_{slide_no:02d}.md"
     meta_path = ppt_root / f"Slide_{slide_no:02d}.meta.json"
-    write_text_atomic(output_path, markdown)
-    write_json(
-        meta_path,
-        build_fail_open_slide_meta(
-            slide_no,
-            markdown,
-            validation.to_dict(),
-            raw_data_map,
-            config,
-            code=code,
-            message=message,
-            fallback_source="stage1_page_ir",
-        ),
+    meta = build_fail_open_slide_meta(
+        slide_no,
+        markdown,
+        validation.to_dict(),
+        raw_data_map,
+        config,
+        code=code,
+        message=message,
+        fallback_source="stage1_page_ir",
     )
+    write_text_atomic(output_path, markdown)
+    write_json(meta_path, meta)
     write_json(
         ppt_root / f"Slide_{slide_no:02d}.error.json",
         build_error_sidecar(
@@ -589,7 +599,13 @@ def _write_stage2_fail_open_markdown(
     )
     page["validation"] = validation.to_dict()
     page["refiner"] = {"changed": False, "applied_ops": [], "dismissed": []}
-    page["final"].update({"status": "fail_open", "reason": code})
+    page["final"].update(
+        {
+            "status": "fail_open",
+            "reason": code,
+            "markdown_source": meta.get("markdown_source"),
+        }
+    )
     return True
 
 

@@ -1,4 +1,12 @@
-from ppt2md_app.artifacts import build_raw_cache_record, stage1_fingerprint, validate_raw_cache_record
+from ppt2md_app.artifacts import (
+    build_fail_open_slide_meta,
+    build_raw_cache_record,
+    build_slide_meta,
+    stage1_fingerprint,
+    stage2_fingerprint,
+    validate_raw_cache_record,
+    validate_slide_meta,
+)
 from ppt2md_app.config import AppConfig
 
 
@@ -76,3 +84,54 @@ def test_raw_cache_without_provenance_does_not_hit(tmp_path):
 
     assert not valid
     assert reason == "invalid"
+
+
+def test_slide_meta_records_brain_markdown_source():
+    config = AppConfig()
+    raw_data_map = {1: "raw"}
+    markdown = "# Slide 1\n\nraw\n"
+    meta = build_slide_meta(1, markdown, {"ok": True, "errors": [], "warnings": []}, raw_data_map, config)
+
+    assert meta["schema_version"] == 2
+    assert meta["markdown_source"] == {
+        "kind": "brain_refine",
+        "source": "stage2_brain",
+        "refiner_changed": False,
+    }
+    valid, reason = validate_slide_meta(meta, 1, markdown, stage2_fingerprint(1, raw_data_map, config))
+    assert valid
+    assert reason == "hit"
+
+
+def test_fail_open_slide_meta_records_page_ir_markdown_source():
+    config = AppConfig()
+    raw_data_map = {1: "raw"}
+    markdown = "# Slide 1\n\nraw\n"
+    meta = build_fail_open_slide_meta(
+        1,
+        markdown,
+        {"ok": True, "errors": [], "warnings": []},
+        raw_data_map,
+        config,
+        code="stage2_failed",
+        message="failed",
+        fallback_source="stage1_page_ir",
+    )
+
+    assert meta["status"] == "fail_open"
+    assert meta["markdown_source"]["kind"] == "stage1_page_ir"
+    assert meta["markdown_source"]["source"] == "deterministic_renderer"
+    assert meta["markdown_source"]["fallback"] is True
+
+
+def test_slide_meta_without_markdown_source_is_legacy_miss():
+    config = AppConfig()
+    raw_data_map = {1: "raw"}
+    markdown = "# Slide 1\n\nraw\n"
+    meta = build_slide_meta(1, markdown, {"ok": True, "errors": [], "warnings": []}, raw_data_map, config)
+    del meta["markdown_source"]
+
+    valid, reason = validate_slide_meta(meta, 1, markdown, stage2_fingerprint(1, raw_data_map, config))
+
+    assert not valid
+    assert reason == "legacy_miss"

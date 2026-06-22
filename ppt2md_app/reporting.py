@@ -40,6 +40,7 @@ def build_run_report(
                     "status": "pending",
                     "included_in_full": False,
                     "reason": None,
+                    "markdown_source": None,
                 },
             }
         )
@@ -107,6 +108,7 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
         "formula_warning_count": formula_warning_count,
         "table_warning_count": table_warning_count,
         "ocr_coverage_warning_count": ocr_coverage_warning_count,
+        "markdown_source_counts": _markdown_source_counts(pages),
         "suspects": summarize_suspects(pages),
     }
     if pages_ok == len(pages):
@@ -226,6 +228,17 @@ def _sum_block_counts(pages: list[Dict[str, Any]]) -> Dict[str, int]:
     for page in pages:
         for block_type, count in (page.get("quality", {}).get("block_counts") or {}).items():
             counts[block_type] = counts.get(block_type, 0) + count
+    return counts
+
+
+def _markdown_source_counts(pages: list[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for page in pages:
+        source = page.get("final", {}).get("markdown_source")
+        if not isinstance(source, dict):
+            continue
+        kind = str(source.get("kind") or "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
     return counts
 
 

@@ -459,6 +459,8 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     raw = read_json(deck_dir / "temp_raw_vision" / "Raw_01.json")
     assert report["status"] == "ok"
     assert report["summary"]["pages_ok"] == 1
+    assert report["summary"]["markdown_source_counts"] == {"brain_refine": 1}
+    assert report["pages"][0]["final"]["markdown_source"]["kind"] == "brain_refine"
     assert report["summary"]["block_refiner_changed_pages"] == 1
     assert report["summary"]["block_refiner_applied_ops"] == 1
     assert report["summary"]["block_counts"]["formula_block"] == 1
@@ -541,8 +543,10 @@ def test_process_single_ppt_task_reports_fail_open_markdown(monkeypatch, tmp_pat
     assert report["summary"]["pages_failed"] == 1
     assert report["summary"]["fail_open_pages"] == 1
     assert report["summary"]["markdown_pages"] == 1
+    assert report["summary"]["markdown_source_counts"] == {"stage1_page_ir": 1}
     assert report["pages"][0]["final"]["included_in_full"] is True
     assert report["pages"][0]["final"]["status"] == "fail_open"
+    assert report["pages"][0]["final"]["markdown_source"]["kind"] == "stage1_page_ir"
     assert read_json(deck_dir / "Slide_01.meta.json")["status"] == "fail_open"
     assert "# Slide 1" in full_markdown
     assert "Stage 2 重组失败" in full_markdown
