@@ -11,7 +11,7 @@ from .renderer import (
 )
 from .table_quality import is_probably_aligned_text_table
 
-PAGE_IR_SCHEMA_VERSION = 8
+PAGE_IR_SCHEMA_VERSION = 9
 
 SEMANTIC_ROLE_LABELS = {
     "definition": "定义",

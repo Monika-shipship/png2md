@@ -479,3 +479,51 @@ def test_block_op_checked_rejects_source_page_slide_mismatch():
     assert refined == page_ir
     assert detail["reason"] == "page_ir_contract_failed"
     assert "source_page_mismatch" in detail["errors"]
+
+
+def test_block_op_checked_rejects_page_ir_missing_schema_version():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 23)
+    del page_ir["schema_version"]
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0023-b001"},
+        slide_no=23,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "schema_version_missing" in detail["errors"]
+
+
+def test_block_op_checked_rejects_non_int_schema_version():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 24)
+    page_ir["schema_version"] = "9"
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0024-b001"},
+        slide_no=24,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "schema_version_not_int" in detail["errors"]
+
+
+def test_block_op_checked_rejects_old_schema_version():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 25)
+    page_ir["schema_version"] = PAGE_IR_SCHEMA_VERSION - 1
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0025-b001"},
+        slide_no=25,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "schema_version_mismatch" in detail["errors"]

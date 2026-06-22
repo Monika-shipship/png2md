@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from .figures import analyze_figure_description
 from .formula_quality import assess_formula_text, normalize_formula_text
+from .ir import PAGE_IR_SCHEMA_VERSION
 from .renderer import render_page_ir_to_markdown
 from .validators import ValidationIssue, is_api_error_text, validate_slide_markdown
 
@@ -672,6 +673,13 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any], *, expected_slide_no: int 
     errors = []
     if not isinstance(page_ir, dict):
         return ["page_ir_not_dict"]
+    schema_version = page_ir.get("schema_version")
+    if "schema_version" not in page_ir:
+        errors.append("schema_version_missing")
+    elif isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        errors.append("schema_version_not_int")
+    elif schema_version != PAGE_IR_SCHEMA_VERSION:
+        errors.append("schema_version_mismatch")
     source_page = page_ir.get("source_page")
     if "source_page" not in page_ir:
         errors.append("source_page_missing")
