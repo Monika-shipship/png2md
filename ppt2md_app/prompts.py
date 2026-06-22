@@ -1,5 +1,5 @@
-PROMPT_STAGE_1_VERSION = "stage1-handwritten-quality-sections-2026-06-22"
-PROMPT_STAGE_2_VERSION = "stage2-brain-2026-06-21"
+PROMPT_STAGE_1_VERSION = "stage1-handwritten-quality-formula-markup-2026-06-22"
+PROMPT_STAGE_2_VERSION = "stage2-brain-formula-markup-2026-06-22"
 
 
 PROMPT_STAGE_1_VISION = r"""
@@ -16,6 +16,8 @@ PROMPT_STAGE_1_VISION = r"""
 【提取要求】
 1. **OCR Text**：逐字提取可见文字，保留原始换行结构。手写内容也要尽量按阅读顺序转写；看不清的字用 `[?]` 标记，不要自行脑补。
 2. **Formula Notes**：所有数学/物理公式转换为 LaTeX 格式。独立公式、推导链、矩阵、方程组请单独输出到 `### Formula` 区块；正文中的短公式可以留在 OCR Text 中。
+   - 公式编号请使用 `\tag{n}`，并放在 `aligned` / `split` / `gathered` 环境外侧；不要把 `\tag{n}` 写进这些环境内部。
+   - Markdown 中不要输出 `align` 或 `align*` 环境；多行推导统一用 `$$ ... \begin{aligned} ... \end{aligned} \tag{n} ... $$`。
 3. **Table Analysis**：如果有表格、手写数据表、实验记录表，请单独输出 `### Table Analysis` 区块，保留行列关系；无法确定列结构时说明不确定，不要强行编造成整齐表格。
 4. **Proof / Example / Solution / Definition 等课堂笔记结构**：
    - 如果页面中有明显的证明、证明步骤、例题、练习题、解答、定义、定理、引理、命题、推论、备注，请用独立区块输出。
@@ -113,6 +115,8 @@ PROMPT_STAGE_2_BRAIN = r"""
    - 可以对比前后页 Raw Data 修正 [Target] 内部明显 OCR 错误，例如 $v$ / $\nu$、上下标、常见术语。
    - 修正必须服务于 [Target] 中已经存在的内容；不得因此引入前后页的新句子。
    - 必须使用 LaTeX 格式：行内公式 $...$，行间公式 $$...$$。不要使用 `\[` 和 `\]`。
+   - 多行公式不要使用 `align` 或 `align*`；请在 `$$` 内使用 `aligned`。
+   - `\tag{{n}}`、`\tag*{{...}}` 等公式编号必须放在 `\end{{aligned}}` / `\end{{split}}` / `\end{{gathered}}` 后面，不能放在环境内部。
 3. **Figure 整合**：检查 [Target] 中是否有 `### Figure Analysis` 区块。
    - 如果有，请在 Markdown 中将其整理为 `> [!NOTE] 图示说明` 引用块。
    - Figure 描述也只能来自 [Target] 的 Figure Analysis，不要根据前后页扩展图意。

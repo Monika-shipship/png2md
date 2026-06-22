@@ -434,6 +434,74 @@ def test_brain_stage_missing_target_formula_block_uses_page_ir_fallback(monkeypa
     assert page_reports[1]["final"]["status"] == "fail_open"
 
 
+def test_brain_stage_normalizes_formula_tag_markup_before_write(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {
+        1: (
+            "### Formula\n"
+            "\\begin{aligned}\n"
+            "S &= k(\\ln Z+\\beta U) \\\\\n"
+            "&= \\frac{3}{2}Nk\\ln T\n"
+            "\\end{aligned}\n"
+            "\\tag{5}"
+        )
+    }
+    target_blocks = {1: build_page_ir(raw_data_map[1], 1)["blocks"]}
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": (
+                "# Slide 1\n\n"
+                "$$\n"
+                "\\begin{align}\n"
+                "S &= k(\\ln Z+\\beta U) \\\\\n"
+                "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+                "\\end{align}\n"
+                "$$\n"
+            ),
+            "raw_response": (
+                "# Slide 1\n\n"
+                "$$\n"
+                "\\begin{align}\n"
+                "S &= k(\\ln Z+\\beta U) \\\\\n"
+                "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+                "\\end{align}\n"
+                "$$\n"
+            ),
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "ok"
+    assert meta["markdown_source"]["kind"] == "brain_refine"
+    assert meta["refiner"]["applied_ops"][0]["op"] == "normalize_formula"
+    assert "\\begin{align}" not in markdown
+    assert "\\tag{5}\n\\end{aligned}" not in markdown
+    assert "\\begin{aligned}\nS &= k(\\ln Z+\\beta U) \\\\\n&= \\frac{3}{2}Nk\\ln T\n\\end{aligned}\n\\tag{5}" in markdown
+    assert "formula_markup_needs_normalize" not in {issue["code"] for issue in meta["validation"]["warnings"]}
+
+
 def test_brain_stage_records_checked_refiner_ops(monkeypatch, tmp_path):
     config = AppConfig(brain_batch_workers=1)
     report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)

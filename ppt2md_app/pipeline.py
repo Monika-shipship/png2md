@@ -678,6 +678,7 @@ def _stage2_warning_fallback_issue(validation: dict, *, slide_no, raw_data_map, 
         "latex_left_right_unbalanced",
         "latex_frac_missing_braces",
         "formula_uncertain_marker",
+        "formula_markup_needs_normalize",
         "inline_math_suspicious",
     }
     for issue in validation.get("warnings") or []:

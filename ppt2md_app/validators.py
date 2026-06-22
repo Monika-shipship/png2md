@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 from typing import Literal
 
 from .coverage import assess_ocr_coverage
+from .formula_quality import markdown_formula_markup_needs_normalize
 from .ir import build_page_ir
 from .table_quality import assess_table
 
@@ -132,6 +133,15 @@ def validate_slide_markdown(
         errors.append(_issue("display_math_unbalanced", "error", "行间公式 $$ 分隔符数量不成对。", slide_no))
     errors.extend(_formula_delimiter_errors(code_free, slide_no))
     warnings.extend(_formula_quality_warnings(code_free, slide_no))
+    if markdown_formula_markup_needs_normalize(code_free):
+        warnings.append(
+            _issue(
+                "formula_markup_needs_normalize",
+                "warning",
+                "公式含不稳定 Markdown/LaTeX 标记，建议统一行间公式环境并将编号移到 align/aligned 外。",
+                slide_no,
+            )
+        )
     warnings.extend(_table_quality_warnings(code_free, slide_no))
     warnings.extend(_target_formula_block_warnings(text, target_blocks, slide_no))
 

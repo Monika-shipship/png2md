@@ -58,6 +58,22 @@ def test_valid_complex_formula_is_not_warned():
     assert result.warnings == []
 
 
+def test_formula_markup_inside_aligned_warns_for_normalization():
+    result = validate_slide_markdown(
+        "# Slide 1\n\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+        "\\end{aligned}\n"
+        "$$\n",
+        1,
+    )
+
+    assert result.ok
+    assert "formula_markup_needs_normalize" in {issue.code for issue in result.warnings}
+
+
 def test_ragged_markdown_table_warns():
     result = validate_slide_markdown("# Slide 1\n\n| A | B |\n| --- | --- |\n| 1 | 2 | 3 |\n", 1)
 

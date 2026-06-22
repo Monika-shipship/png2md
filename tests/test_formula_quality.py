@@ -1,4 +1,4 @@
-from ppt2md_app.formula_quality import assess_formula_text, normalize_formula_text
+from ppt2md_app.formula_quality import assess_formula_text, normalize_formula_text, normalize_markdown_formula_blocks
 
 
 def test_formula_quality_normalizes_display_delimiters():
@@ -50,3 +50,65 @@ def test_formula_quality_warns_on_half_open_interval_without_uncertain_marker():
     assert not result.ok
     assert result.uncertain is False
     assert "formula_bracket_unbalanced" in [warning.code for warning in result.warnings]
+
+
+def test_formula_quality_moves_tag_outside_aligned_environment():
+    source = (
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+        "\\end{aligned}"
+    )
+
+    normalized = normalize_formula_text(source)
+
+    assert normalized == (
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T\n"
+        "\\end{aligned}\n"
+        "\\tag{5}"
+    )
+
+
+def test_formula_quality_converts_align_and_trailing_quad_number_to_aligned_tag():
+    source = (
+        "\\begin{align}\n"
+        "A &= B \\\\\n"
+        "&= C \\quad (2)\n"
+        "\\end{align}"
+    )
+
+    normalized = normalize_formula_text(source)
+
+    assert normalized == (
+        "\\begin{aligned}\n"
+        "A &= B \\\\\n"
+        "&= C\n"
+        "\\end{aligned}\n"
+        "\\tag{2}"
+    )
+
+
+def test_markdown_formula_normalization_skips_code_fences():
+    markdown = (
+        "# Slide 1\n\n"
+        "```text\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "x &= y \\tag{raw}\n"
+        "\\end{aligned}\n"
+        "$$\n"
+        "```\n\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "x &= y \\tag{1}\n"
+        "\\end{aligned}\n"
+        "$$\n"
+    )
+
+    normalized = normalize_markdown_formula_blocks(markdown)
+
+    assert "\\tag{raw}\n\\end{aligned}" in normalized
+    assert "\\begin{aligned}\nx &= y\n\\end{aligned}\n\\tag{1}" in normalized
+    assert "\\tag{1}\n\\end{aligned}" not in normalized

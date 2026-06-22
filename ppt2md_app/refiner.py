@@ -4,7 +4,13 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 from .figures import analyze_figure_description
-from .formula_quality import assess_formula_text, normalize_formula_text
+from .formula_quality import (
+    assess_formula_text,
+    formula_markup_needs_normalize,
+    markdown_formula_markup_needs_normalize,
+    normalize_formula_text,
+    normalize_markdown_formula_blocks,
+)
 from .invariant import page_ir_contract_errors, valid_source_page
 from .renderer import render_page_ir_to_markdown
 from .validators import ValidationIssue, is_api_error_text, validate_slide_markdown
@@ -16,6 +22,7 @@ KNOWN_OPS = {
     "drop_empty",
     "merge_broken_line",
     "mark_failed_page",
+    "normalize_formula",
 }
 
 SAFE_OPS = {
@@ -23,9 +30,10 @@ SAFE_OPS = {
     "fix_heading",
     "drop_empty",
     "merge_broken_line",
+    "normalize_formula",
 }
 
-BLOCK_REFINER_VERSION = "block-refiner-2026-06-21"
+BLOCK_REFINER_VERSION = "block-refiner-2026-06-22-formula-markup"
 
 BLOCK_KNOWN_OPS = {
     "merge_block",
@@ -167,6 +175,17 @@ def detect_markdown_suspects(markdown: str, slide_no: int) -> List[Suspect]:
             )
         )
 
+    if markdown_formula_markup_needs_normalize(text):
+        suspects.append(
+            Suspect(
+                id=f"p{slide_no:04d}-s005",
+                code="formula_markup_needs_normalize",
+                op="normalize_formula",
+                reason="公式含不稳定 Markdown/LaTeX 标记，应移动编号并统一行间公式环境。",
+                evidence=_formula_markup_evidence(text),
+            )
+        )
+
     return suspects
 
 
@@ -252,7 +271,7 @@ def detect_block_suspects(page_ir: Dict[str, Any]) -> List[BlockSuspect]:
                     suspect_no,
                     "formula_needs_normalize",
                     {"op": "normalize_formula", "id": block_id},
-                    "公式 block 含外层公式分隔符，应规范为内部 LaTeX 文本。",
+                    "公式 block 含外层分隔符或不稳定公式编号位置，应规范为可渲染 LaTeX 文本。",
                     text,
                 )
             )
@@ -482,6 +501,8 @@ def _apply_op(markdown: str, op: str, slide_no: int) -> str:
         return re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     if op == "merge_broken_line":
         return re.sub(r"(?m)([A-Za-z])-\n([A-Za-z])", r"\1\2", markdown).strip() + "\n"
+    if op == "normalize_formula":
+        return normalize_markdown_formula_blocks(markdown).rstrip() + "\n"
     return markdown
 
 
@@ -796,19 +817,20 @@ def _looks_like_figure_description(text: str) -> bool:
 
 
 def _formula_needs_normalize(text: str) -> bool:
-    stripped = text.strip()
-    return (
-        stripped.startswith("$$")
-        or stripped.endswith("$$")
-        or stripped.startswith(r"\[")
-        or stripped.endswith(r"\]")
-        or stripped.startswith(r"\(")
-        or stripped.endswith(r"\)")
-    )
+    return formula_markup_needs_normalize(text)
 
 
 def _normalize_formula_text(text: str) -> str:
     return normalize_formula_text(text)
+
+
+def _formula_markup_evidence(text: str) -> str | None:
+    match = re.search(r"\$\$(.*?)\$\$", text or "", flags=re.DOTALL)
+    if not match:
+        match = re.search(r"\\\[(.*?)\\\]", text or "", flags=re.DOTALL)
+    if not match:
+        return None
+    return _text_preview(match.group(0), limit=160)
 
 
 def _has_uncertain_marker(text: str) -> bool:

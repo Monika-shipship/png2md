@@ -54,6 +54,34 @@ def test_refiner_can_merge_broken_hyphenated_line():
     assert result.validation["ok"] is True
 
 
+def test_refiner_moves_tag_outside_aligned_environment_in_markdown():
+    markdown = (
+        "# Slide 3\n\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+        "\\end{aligned}\n"
+        "$$\n"
+    )
+
+    result = refine_slide_markdown(markdown, 3)
+
+    assert result.changed is True
+    assert result.applied_ops[0]["op"] == "normalize_formula"
+    assert "\\tag{5}\n\\end{aligned}" not in result.markdown
+    assert (
+        "$$\n"
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T\n"
+        "\\end{aligned}\n"
+        "\\tag{5}\n"
+        "$$"
+    ) in result.markdown
+    assert "formula_markup_needs_normalize" not in {issue["code"] for issue in result.validation["warnings"]}
+
+
 def test_block_refiner_known_ops_are_block_id_based():
     assert {
         "merge_block",
@@ -104,6 +132,36 @@ def test_block_refiner_normalizes_formula_and_is_idempotent():
     assert render_page_ir_to_markdown(first.page_ir) == "# Slide 2\n\n$$\nE = mc^2\n$$\n"
     assert second.changed is False
     assert second.applied_ops == []
+
+
+def test_block_refiner_moves_formula_tag_outside_aligned_environment():
+    page_ir = build_page_ir(
+        "### Formula\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T \\tag{5}\n"
+        "\\end{aligned}\n"
+        "$$",
+        26,
+    )
+
+    result = refine_page_ir(page_ir, slide_no=26)
+    block = result.page_ir["blocks"][0]
+
+    assert result.changed is True
+    assert block["text"].endswith("\\end{aligned}\n\\tag{5}")
+    assert "\\tag{5}\n\\end{aligned}" not in block["text"]
+    assert render_page_ir_to_markdown(result.page_ir) == (
+        "# Slide 26\n\n"
+        "$$\n"
+        "\\begin{aligned}\n"
+        "S &= k(\\ln Z+\\beta U) \\\\\n"
+        "&= \\frac{3}{2}Nk\\ln T\n"
+        "\\end{aligned}\n"
+        "\\tag{5}\n"
+        "$$\n"
+    )
 
 
 def test_block_refiner_promotes_heading_and_marks_uncertain_without_markdown_patch():

@@ -24,6 +24,7 @@ VALIDATION_OP_HINTS = {
     "formula_bracket_unbalanced": "normalize_formula",
     "latex_left_right_unbalanced": "normalize_formula",
     "latex_frac_missing_braces": "normalize_formula",
+    "formula_markup_needs_normalize": "normalize_formula",
     "formula_uncertain_marker": "mark_uncertain",
     "table_structure_warning": "mark_uncertain",
     "short_body": "inspect_ocr_coverage",
