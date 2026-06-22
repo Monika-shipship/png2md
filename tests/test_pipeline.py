@@ -238,3 +238,57 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     assert raw["provenance"]["summary"]["origin_counts"]["refiner_op"] == 1
     assert raw["block_refiner"]["applied_ops"][0]["after_block_ids"]
     assert "# Slide 1" in (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
+
+
+def test_process_single_ppt_task_reports_fail_open_markdown(monkeypatch, tmp_path):
+    image = tmp_path / "page.png"
+    image.write_bytes(b"fake image")
+    output = tmp_path / "out"
+    config = AppConfig(output_folder=str(output), vision_batch_workers=1, brain_batch_workers=1)
+    raw_text = "热力学第一定律描述内能、热量和功之间的关系。"
+
+    monkeypatch.setattr(pipeline, "set_dashscope_api_key", lambda config: None)
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_1_vision",
+        lambda img_path, slide_no, ppt_name, msg_queue, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "raw_text": raw_text,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": False,
+            "slide_no": slide_no,
+            "error": "Brain Error: 500",
+            "error_code": "Brain Error",
+            "raw_response": "Brain Error: 500",
+        },
+    )
+
+    result = pipeline.process_single_ppt_task(
+        "Deck",
+        {"images": [str(image)], "range_start": 0, "range_end": 1, "task_id": 1},
+        DummyQueue(),
+        config,
+    )
+
+    assert result == "Deck Done"
+    deck_dir = output / "Deck"
+    report = read_json(deck_dir / "run_report.json")
+    full_markdown = (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
+
+    assert report["status"] == "fail_open"
+    assert report["summary"]["pages_ok"] == 0
+    assert report["summary"]["pages_failed"] == 1
+    assert report["summary"]["fail_open_pages"] == 1
+    assert report["summary"]["markdown_pages"] == 1
+    assert report["pages"][0]["final"]["included_in_full"] is True
+    assert report["pages"][0]["final"]["status"] == "fail_open"
+    assert read_json(deck_dir / "Slide_01.meta.json")["status"] == "fail_open"
+    assert "# Slide 1" in full_markdown
+    assert "Stage 2 重组失败" in full_markdown
+    assert "热力学第一定律" in full_markdown

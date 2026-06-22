@@ -68,7 +68,9 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
     report["finished_at"] = now_iso()
     pages = report.get("pages") or []
     pages_ok = sum(1 for page in pages if page.get("final", {}).get("status") == "ok")
+    fail_open_pages = sum(1 for page in pages if page.get("final", {}).get("status") == "fail_open")
     pages_failed = sum(1 for page in pages if page.get("final", {}).get("status") in ("failed", "fail_open"))
+    markdown_pages = sum(1 for page in pages if page.get("final", {}).get("included_in_full"))
     stage1_cache_hits = sum(1 for page in pages if page.get("stage1", {}).get("cache") == "hit")
     stage2_cache_hits = sum(1 for page in pages if page.get("stage2", {}).get("cache") == "hit")
     warnings = sum(len(page.get("validation", {}).get("warnings") or []) for page in pages)
@@ -92,7 +94,8 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
         "pages_failed": pages_failed,
         "stage1_cache_hits": stage1_cache_hits,
         "stage2_cache_hits": stage2_cache_hits,
-        "fail_open_pages": sum(1 for page in pages if page.get("final", {}).get("status") == "fail_open"),
+        "fail_open_pages": fail_open_pages,
+        "markdown_pages": markdown_pages,
         "validation_warnings": warnings,
         "block_refiner_changed_pages": sum(1 for page in pages if page.get("block_refiner", {}).get("changed")),
         "block_refiner_applied_ops": block_refiner_applied_ops,
@@ -108,7 +111,9 @@ def finalize_run_report(report: Dict[str, Any]) -> Dict[str, Any]:
     }
     if pages_ok == len(pages):
         report["status"] = "ok"
-    elif pages_ok > 0:
+    elif pages_ok + fail_open_pages == len(pages) and fail_open_pages:
+        report["status"] = "fail_open"
+    elif pages_ok > 0 or fail_open_pages > 0:
         report["status"] = "partial_failed"
     else:
         report["status"] = "failed"
