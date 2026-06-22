@@ -314,7 +314,8 @@ def _run_brain_stage(
                     valid, cache_status = validate_slide_meta(meta, actual_slide_no, markdown, expected_fingerprint)
                     page["stage2"]["cache"] = cache_status
                     if valid:
-                        _apply_stage_provider_audit(page, "stage2", (meta.get("metadata") or {}).get("provider") or {})
+                        provider_audit = (meta.get("metadata") or {}).get("provider") or {}
+                        _apply_stage_provider_audit(page, "stage2", provider_audit)
                         validation = validate_slide_markdown(
                             markdown,
                             actual_slide_no,
@@ -325,6 +326,31 @@ def _run_brain_stage(
                         page["validation"] = validation.to_dict()
                         refresh_page_suspects(page, target_blocks_by_slide.get(actual_slide_no))
                         if validation.ok:
+                            fallback_issue = _stage2_warning_fallback_issue(
+                                validation.to_dict(),
+                                slide_no=actual_slide_no,
+                                raw_data_map=raw_data_map,
+                                target_blocks=target_blocks_by_slide.get(actual_slide_no),
+                            )
+                            if fallback_issue and _write_stage2_fail_open_markdown(
+                                ppt_root=ppt_root,
+                                slide_no=actual_slide_no,
+                                code=fallback_issue["code"],
+                                message=fallback_issue["message"],
+                                raw_data_map=raw_data_map,
+                                target_blocks=target_blocks_by_slide.get(actual_slide_no),
+                                config=config,
+                                page=page,
+                                raw_response=markdown,
+                                source_validation=validation.to_dict(),
+                                provider_audit=provider_audit,
+                            ):
+                                msg_queue.put(("advance", task_id, 1))
+                                skipped += 1
+                                ok_slides.append(actual_slide_no)
+                                refresh_page_suspects(page, target_blocks_by_slide.get(actual_slide_no))
+                                msg_queue.put(("log", f"[{ppt_name}] P{actual_slide_no} 缓存 {fallback_issue['code']}，已改写为保守 Markdown fallback"))
+                                continue
                             page["stage2"].update(
                                 {
                                     "status": "ok",
