@@ -1,0 +1,7 @@
+{
+  "name": "plain_text_handwritten",
+  "slide_no": 1,
+  "tags": ["handwritten", "text"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}

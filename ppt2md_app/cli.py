@@ -7,12 +7,31 @@ from multiprocessing import Manager
 from pathlib import Path
 
 from .config import AppConfig
+from .eval import DEFAULT_EVAL_FIXTURE_DIR, DEFAULT_EVAL_OUTPUT_PATH
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="DocPage2MD (document-page images to Markdown)")
     parser.add_argument("-n", "--name", type=str, default="default", help="任务会话名称")
     parser.add_argument("-o", "--output", type=str, default="./markdown_output", help="输出目录路径")
+    parser.add_argument(
+        "--eval-fixtures",
+        nargs="?",
+        const=DEFAULT_EVAL_FIXTURE_DIR,
+        default=None,
+        help=f"运行离线评测 fixtures，然后退出（默认 {DEFAULT_EVAL_FIXTURE_DIR}）",
+    )
+    parser.add_argument(
+        "--eval-output",
+        type=str,
+        default=DEFAULT_EVAL_OUTPUT_PATH,
+        help=f"离线评测报告输出路径（默认 {DEFAULT_EVAL_OUTPUT_PATH}）",
+    )
+    parser.add_argument(
+        "--fix-ocr-confusion",
+        action="store_true",
+        help="显式启用低密度 OCR 形近字符白名单修正（默认关闭）",
+    )
 
     # 模型目录管理
     parser.add_argument("--list-models", action="store_true", help="列出可用模型，然后退出")
@@ -60,6 +79,7 @@ def build_config(args):
         list_all_models=args.list_all_models,
         refresh_models=args.refresh_models,
         verify_models=args.verify_models,
+        fix_ocr_confusion=args.fix_ocr_confusion,
     )
 
 
@@ -208,6 +228,17 @@ def _display_models_table(console, records, max_rows=120):
 def main(argv=None):
     configure_stdio()
     args = parse_args(argv)
+    if args.eval_fixtures:
+        from .eval import run_offline_eval
+
+        report = run_offline_eval(args.eval_fixtures, args.eval_output)
+        summary = report["summary"]
+        print(
+            f"offline eval: {summary['cases_passed']}/{summary['cases_total']} passed, "
+            f"report={report['output_path']}"
+        )
+        return 0 if summary["cases_failed"] == 0 else 1
+
     if not ensure_dependencies():
         return 1
 

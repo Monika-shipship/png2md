@@ -1,0 +1,7 @@
+{
+  "name": "mixed_notes_page",
+  "slide_no": 6,
+  "tags": ["handwritten", "mixed", "formula", "figure", "table"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}

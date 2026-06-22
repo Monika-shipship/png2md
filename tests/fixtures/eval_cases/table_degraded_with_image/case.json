@@ -1,0 +1,7 @@
+{
+  "name": "table_degraded_with_image",
+  "slide_no": 5,
+  "tags": ["table", "degraded"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}

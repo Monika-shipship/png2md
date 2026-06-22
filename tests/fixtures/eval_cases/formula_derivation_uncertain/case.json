@@ -1,0 +1,7 @@
+{
+  "name": "formula_derivation_uncertain",
+  "slide_no": 2,
+  "tags": ["handwritten", "formula", "uncertain"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}

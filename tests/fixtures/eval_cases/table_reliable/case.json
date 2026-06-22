@@ -1,0 +1,7 @@
+{
+  "name": "table_reliable",
+  "slide_no": 4,
+  "tags": ["table", "reliable"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}

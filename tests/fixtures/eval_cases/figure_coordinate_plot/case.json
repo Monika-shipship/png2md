@@ -1,0 +1,7 @@
+{
+  "name": "figure_coordinate_plot",
+  "slide_no": 3,
+  "tags": ["handwritten", "figure", "coordinate_plot"],
+  "expected_warning_codes": [],
+  "allow_warning_codes": []
+}
