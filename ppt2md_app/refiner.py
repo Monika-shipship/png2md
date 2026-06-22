@@ -50,6 +50,18 @@ BLOCK_ALLOWED_ORIGINS = {
     "refiner_op",
 }
 
+BLOCK_ALLOWED_TYPES = {
+    "heading",
+    "paragraph",
+    "list",
+    "formula_inline",
+    "formula_block",
+    "figure_note",
+    "table",
+    "image_ref",
+    "uncertain",
+}
+
 
 @dataclass(frozen=True)
 class Suspect:
@@ -670,9 +682,12 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any]) -> list[str]:
         elif block_id in seen:
             errors.append(f"block_{index}_duplicate_id")
         seen.add(block_id)
-        if not block.get("type"):
+        block_type = block.get("type")
+        if not block_type:
             errors.append(f"block_{index}_missing_type")
-        if "text" not in block and block.get("type") != "image_ref":
+        elif block_type not in BLOCK_ALLOWED_TYPES:
+            errors.append(f"block_{index}_unknown_type")
+        if "text" not in block and block_type != "image_ref":
             errors.append(f"block_{index}_missing_text")
         if block.get("source_page") != page_ir.get("source_page"):
             errors.append(f"block_{index}_source_page_mismatch")
