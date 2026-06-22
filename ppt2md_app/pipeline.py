@@ -399,12 +399,12 @@ def _run_brain_stage(
                         _write_stage2_failure(ppt_root, slide_no, "validation_failed", message, validation=validation.to_dict())
                         failed += 1
                         continue
-                    coverage_fallback_message = _coverage_fallback_message(validation.to_dict())
-                    if coverage_fallback_message and _write_stage2_fail_open_markdown(
+                    fallback_issue = _stage2_warning_fallback_issue(validation.to_dict())
+                    if fallback_issue and _write_stage2_fail_open_markdown(
                         ppt_root=ppt_root,
                         slide_no=slide_no,
-                        code="ocr_coverage_low",
-                        message=coverage_fallback_message,
+                        code=fallback_issue["code"],
+                        message=fallback_issue["message"],
                         raw_data_map=raw_data_map,
                         target_blocks=target_blocks_by_slide.get(slide_no),
                         config=config,
@@ -414,7 +414,7 @@ def _run_brain_stage(
                     ):
                         ok_slides.append(slide_no)
                         refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
-                        msg_queue.put(("log", f"[{ppt_name}] P{slide_no} OCR 覆盖率偏低，已写入保守 Markdown fallback"))
+                        msg_queue.put(("log", f"[{ppt_name}] P{slide_no} {fallback_issue['code']}，已写入保守 Markdown fallback"))
                         continue
 
                     write_text_atomic(output_path, final_markdown)
@@ -611,12 +611,21 @@ def _one_line_error(code: str, message: str) -> str:
     return f"{code}: {text}" if text else str(code)
 
 
-def _coverage_fallback_message(validation: dict) -> str | None:
+def _stage2_warning_fallback_issue(validation: dict) -> dict | None:
+    fallback_codes = {
+        "ocr_coverage_low",
+        "figure_note_missing",
+        "unrendered_figure_analysis",
+        "table_structure_warning",
+    }
     for issue in validation.get("warnings") or []:
-        if isinstance(issue, dict) and issue.get("code") == "ocr_coverage_low":
-            message = issue.get("message") or "最终 Markdown 对当前页 OCR 正文覆盖率偏低。"
+        if not isinstance(issue, dict):
+            continue
+        code = str(issue.get("code") or "")
+        if code in fallback_codes:
+            message = issue.get("message") or code
             evidence = issue.get("evidence")
-            return f"{message} {evidence}".strip()
+            return {"code": code, "message": f"{message} {evidence}".strip()}
     return None
 
 

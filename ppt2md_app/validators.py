@@ -309,7 +309,11 @@ def _markdown_table_candidates(text: str) -> list[str]:
 
 
 def _has_figure_note(text: str) -> bool:
-    return "> [!NOTE] Figure 描述" in text or "> [!NOTE] 图示说明" in text
+    return (
+        "> [!NOTE] Figure 描述" in text
+        or "> [!NOTE] 图示说明" in text
+        or "> [!WARNING] 图示识别不确定" in text
+    )
 
 
 def _find_possible_neighbor_leak(markdown: str, target_raw: str, neighbor_raw: dict[int, str]) -> str | None:

@@ -104,6 +104,17 @@ def test_chinese_figure_note_satisfies_figure_analysis():
     assert result.warnings == []
 
 
+def test_figure_warning_satisfies_figure_analysis():
+    result = validate_slide_markdown(
+        "# Slide 1\n\n> [!WARNING] 图示识别不确定\n> 图中左侧区域被遮挡。\n",
+        1,
+        target_raw="### Figure Analysis\n图中左侧区域被遮挡。",
+    )
+
+    assert result.ok
+    assert result.warnings == []
+
+
 def test_low_ocr_coverage_warns_but_does_not_block():
     result = validate_slide_markdown(
         "# Slide 1\n\n热力学第一定律。\n",

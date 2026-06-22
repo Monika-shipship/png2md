@@ -184,6 +184,114 @@ def test_brain_stage_low_ocr_coverage_uses_markdown_fail_open(monkeypatch, tmp_p
     assert page_reports[1]["stage2"]["error_code"] == "ocr_coverage_low"
 
 
+def test_brain_stage_missing_figure_note_uses_markdown_fail_open(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "### Figure Analysis\n左侧是 A，右侧是 B，中间有箭头连接。"}
+    target_blocks = {
+        1: [
+            {
+                "id": "p0001-b001",
+                "type": "figure_note",
+                "text": "左侧是 A，右侧是 B，中间有箭头连接。",
+                "description": "左侧是 A，右侧是 B，中间有箭头连接。",
+                "source_page": 1,
+                "confidence": 0.72,
+                "origin": "vision_description",
+                "evidence": {"raw_text": raw_data_map[1]},
+                "bbox": None,
+                "unrecognizable": False,
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": "# Slide 1\n\n图中有两个对象。\n",
+            "raw_response": "# Slide 1\n\n图中有两个对象。\n",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "fail_open"
+    assert meta["error"]["code"] == "figure_note_missing"
+    assert "> [!NOTE] 图示说明" in markdown
+    assert "左侧是 A，右侧是 B" in markdown
+
+
+def test_brain_stage_bad_table_uses_markdown_fail_open(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "### Table Analysis\n| 量 | 值 |\n| --- | --- |\n| 力 | N |"}
+    target_blocks = {
+        1: [
+            {
+                "id": "p0001-b001",
+                "type": "table",
+                "text": "| 量 | 值 |\n| --- | --- |\n| 力 | N |",
+                "source_page": 1,
+                "confidence": 0.72,
+                "origin": "vision_table",
+                "evidence": {"raw_text": raw_data_map[1]},
+                "bbox": None,
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": "# Slide 1\n\n| 量 | 值 |\n| --- | --- |\n| 力 | N | extra |\n",
+            "raw_response": "# Slide 1\n\n| 量 | 值 |\n| --- | --- |\n| 力 | N | extra |\n",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "fail_open"
+    assert meta["error"]["code"] == "table_structure_warning"
+    assert "| 力 | N |" in markdown
+    assert "extra" not in markdown
+
+
 def test_brain_stage_records_checked_refiner_ops(monkeypatch, tmp_path):
     config = AppConfig(brain_batch_workers=1)
     report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
@@ -243,8 +351,18 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
         lambda slide_no, raw_data_map, config: {
             "success": True,
             "slide_no": slide_no,
-            "markdown": "# Slide 1\n\n热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n",
-            "raw_response": "# Slide 1\n\n热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n",
+            "markdown": (
+                "# Slide 1\n\n"
+                "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
+                "> [!WARNING] 图示识别不确定\n"
+                "> 图示被遮挡，无法确定节点和箭头方向。\n"
+            ),
+            "raw_response": (
+                "# Slide 1\n\n"
+                "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
+                "> [!WARNING] 图示识别不确定\n"
+                "> 图示被遮挡，无法确定节点和箭头方向。\n"
+            ),
         },
     )
 
