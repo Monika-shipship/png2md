@@ -62,6 +62,14 @@ BLOCK_ALLOWED_TYPES = {
     "uncertain",
 }
 
+BLOCK_VISION_ORIGINS = {
+    "vision_ocr",
+    "vision_formula",
+    "vision_description",
+    "vision_table",
+    "vision_uncertain",
+}
+
 
 @dataclass(frozen=True)
 class Suspect:
@@ -706,6 +714,10 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any]) -> list[str]:
             errors.append(f"block_{index}_unknown_origin")
         if "evidence" not in block:
             errors.append(f"block_{index}_missing_evidence")
+        elif not isinstance(block.get("evidence"), dict):
+            errors.append(f"block_{index}_invalid_evidence")
+        else:
+            errors.extend(_block_evidence_errors(index, block))
     return errors
 
 
@@ -725,6 +737,17 @@ def _valid_confidence(value) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return 0.0 <= float(value) <= 1.0
+
+
+def _block_evidence_errors(index: int, block: Dict[str, Any]) -> list[str]:
+    evidence = block.get("evidence") or {}
+    origin = block.get("origin")
+    errors = []
+    if origin in BLOCK_VISION_ORIGINS and not isinstance(evidence.get("raw_text"), str):
+        errors.append(f"block_{index}_missing_raw_text_evidence")
+    if origin == "refiner_op" and not isinstance(evidence.get("refiner_op"), str):
+        errors.append(f"block_{index}_missing_refiner_op_evidence")
+    return errors
 
 
 def _looks_like_body_text(text: str) -> bool:

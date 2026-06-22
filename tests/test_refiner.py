@@ -296,3 +296,52 @@ def test_block_op_checked_rejects_invalid_confidence_value():
     assert refined == page_ir
     assert detail["reason"] == "page_ir_contract_failed"
     assert "block_1_invalid_confidence" in detail["errors"]
+
+
+def test_block_op_checked_rejects_non_dict_evidence():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 12)
+    page_ir["blocks"][1]["evidence"] = "raw text"
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0012-b001"},
+        slide_no=12,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "block_1_invalid_evidence" in detail["errors"]
+
+
+def test_block_op_checked_rejects_vision_block_without_raw_text_evidence():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 13)
+    page_ir["blocks"][1]["evidence"] = {}
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0013-b001"},
+        slide_no=13,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "block_1_missing_raw_text_evidence" in detail["errors"]
+
+
+def test_block_op_checked_rejects_refiner_block_without_refiner_op_evidence():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 14)
+    page_ir["blocks"][1]["origin"] = "refiner_op"
+    page_ir["blocks"][1]["evidence"] = {"raw_text": "后续正文。"}
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0014-b001"},
+        slide_no=14,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "block_1_missing_refiner_op_evidence" in detail["errors"]

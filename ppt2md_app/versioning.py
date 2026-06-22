@@ -1,3 +1,3 @@
 """Compatibility versions for generated png2md artifacts."""
 
-PNG2MD_PIPELINE_VERSION = "2026.06.22-v12-block-confidence-contract"
+PNG2MD_PIPELINE_VERSION = "2026.06.22-v13-block-evidence-contract"
