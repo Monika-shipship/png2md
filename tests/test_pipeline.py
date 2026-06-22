@@ -1,5 +1,6 @@
 from ppt2md_app.config import AppConfig
 from ppt2md_app.files import read_json, write_json
+from ppt2md_app.ir import build_page_ir
 from ppt2md_app.reporting import build_run_report
 from ppt2md_app import pipeline
 
@@ -290,6 +291,85 @@ def test_brain_stage_bad_table_uses_markdown_fail_open(monkeypatch, tmp_path):
     assert meta["error"]["code"] == "table_structure_warning"
     assert "| 力 | N |" in markdown
     assert "extra" not in markdown
+
+
+def test_brain_stage_bad_formula_falls_back_when_page_ir_is_clean(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "### Formula\nE = mc^2"}
+    target_blocks = {1: build_page_ir(raw_data_map[1], 1)["blocks"]}
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": "# Slide 1\n\n$$\n\\frac a}{b\n$$\n",
+            "raw_response": "# Slide 1\n\n$$\n\\frac a}{b\n$$\n",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "fail_open"
+    assert meta["error"]["code"] in {"formula_brace_unbalanced", "latex_frac_missing_braces"}
+    assert "$$\nE = mc^2\n$$" in markdown
+    assert "$$\n\\frac a}{b\n$$" not in markdown
+
+
+def test_brain_stage_formula_warning_does_not_fallback_when_page_ir_is_not_better(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "### Formula\n\\frac a}{b"}
+    target_blocks = {1: build_page_ir(raw_data_map[1], 1)["blocks"]}
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": "# Slide 1\n\n$$\n\\frac a}{b\n$$\n",
+            "raw_response": "# Slide 1\n\n$$\n\\frac a}{b\n$$\n",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "ok"
+    assert "\\frac a}{b" in markdown
+    assert page_reports[1]["validation"]["warnings"]
 
 
 def test_brain_stage_records_checked_refiner_ops(monkeypatch, tmp_path):

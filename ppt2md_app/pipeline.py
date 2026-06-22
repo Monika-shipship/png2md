@@ -399,7 +399,12 @@ def _run_brain_stage(
                         _write_stage2_failure(ppt_root, slide_no, "validation_failed", message, validation=validation.to_dict())
                         failed += 1
                         continue
-                    fallback_issue = _stage2_warning_fallback_issue(validation.to_dict())
+                    fallback_issue = _stage2_warning_fallback_issue(
+                        validation.to_dict(),
+                        slide_no=slide_no,
+                        raw_data_map=raw_data_map,
+                        target_blocks=target_blocks_by_slide.get(slide_no),
+                    )
                     if fallback_issue and _write_stage2_fail_open_markdown(
                         ppt_root=ppt_root,
                         slide_no=slide_no,
@@ -533,25 +538,16 @@ def _write_stage2_fail_open_markdown(
     raw_response=None,
     source_validation=None,
 ) -> bool:
-    if not target_blocks:
-        return False
-
-    body = _strip_slide_heading(render_blocks_to_markdown(target_blocks, slide_no), slide_no)
-    markdown = (
-        f"# Slide {slide_no}\n\n"
-        "> [!WARNING] Stage 2 重组失败，已使用 Stage 1 确定性 Markdown fallback。\n"
-        f"> 原因：{_one_line_error(code, message)}\n\n"
-        f"{body}"
-    ).rstrip() + "\n"
-
-    validation = validate_slide_markdown(
-        markdown,
-        slide_no,
-        raw_response=None,
-        target_raw=raw_data_map.get(slide_no),
+    fallback = _build_stage2_fallback_markdown(
+        slide_no=slide_no,
+        code=code,
+        message=message,
+        raw_data_map=raw_data_map,
         target_blocks=target_blocks,
-        neighbor_raw=_neighbor_raw_map(raw_data_map, slide_no),
     )
+    if not fallback:
+        return False
+    markdown, validation = fallback
     if not validation.ok:
         return False
 
@@ -597,6 +593,29 @@ def _write_stage2_fail_open_markdown(
     return True
 
 
+def _build_stage2_fallback_markdown(*, slide_no, code, message, raw_data_map, target_blocks):
+    if not target_blocks:
+        return None
+
+    body = _strip_slide_heading(render_blocks_to_markdown(target_blocks, slide_no), slide_no)
+    markdown = (
+        f"# Slide {slide_no}\n\n"
+        "> [!WARNING] Stage 2 重组失败，已使用 Stage 1 确定性 Markdown fallback。\n"
+        f"> 原因：{_one_line_error(code, message)}\n\n"
+        f"{body}"
+    ).rstrip() + "\n"
+
+    validation = validate_slide_markdown(
+        markdown,
+        slide_no,
+        raw_response=None,
+        target_raw=raw_data_map.get(slide_no),
+        target_blocks=target_blocks,
+        neighbor_raw=_neighbor_raw_map(raw_data_map, slide_no),
+    )
+    return markdown, validation
+
+
 def _strip_slide_heading(markdown: str, slide_no: int) -> str:
     lines = (markdown or "").splitlines()
     if lines and lines[0].strip().lower() == f"# slide {slide_no}".lower():
@@ -611,12 +630,21 @@ def _one_line_error(code: str, message: str) -> str:
     return f"{code}: {text}" if text else str(code)
 
 
-def _stage2_warning_fallback_issue(validation: dict) -> dict | None:
+def _stage2_warning_fallback_issue(validation: dict, *, slide_no, raw_data_map, target_blocks) -> dict | None:
     fallback_codes = {
         "ocr_coverage_low",
         "figure_note_missing",
         "unrendered_figure_analysis",
         "table_structure_warning",
+    }
+    formula_codes = {
+        "formula_brace_unbalanced",
+        "formula_parenthesis_unbalanced",
+        "formula_bracket_unbalanced",
+        "latex_left_right_unbalanced",
+        "latex_frac_missing_braces",
+        "formula_uncertain_marker",
+        "inline_math_suspicious",
     }
     for issue in validation.get("warnings") or []:
         if not isinstance(issue, dict):
@@ -626,7 +654,46 @@ def _stage2_warning_fallback_issue(validation: dict) -> dict | None:
             message = issue.get("message") or code
             evidence = issue.get("evidence")
             return {"code": code, "message": f"{message} {evidence}".strip()}
+        if code in formula_codes and _fallback_reduces_formula_warnings(
+            validation,
+            slide_no=slide_no,
+            raw_data_map=raw_data_map,
+            target_blocks=target_blocks,
+        ):
+            message = issue.get("message") or code
+            evidence = issue.get("evidence")
+            return {"code": code, "message": f"{message} {evidence}".strip()}
     return None
+
+
+def _fallback_reduces_formula_warnings(validation: dict, *, slide_no, raw_data_map, target_blocks) -> bool:
+    current = _warning_count(validation, ("formula_", "latex_", "inline_math_suspicious"))
+    if current <= 0:
+        return False
+    fallback = _build_stage2_fallback_markdown(
+        slide_no=slide_no,
+        code="formula_quality_warning",
+        message="Stage 2 公式质量低于 PageIR fallback。",
+        raw_data_map=raw_data_map,
+        target_blocks=target_blocks,
+    )
+    if not fallback:
+        return False
+    _, fallback_validation = fallback
+    if not fallback_validation.ok:
+        return False
+    return _warning_count(fallback_validation.to_dict(), ("formula_", "latex_", "inline_math_suspicious")) < current
+
+
+def _warning_count(validation: dict, codes_or_prefixes: tuple[str, ...]) -> int:
+    count = 0
+    for issue in validation.get("warnings") or []:
+        if not isinstance(issue, dict):
+            continue
+        code = str(issue.get("code") or "")
+        if any(code == item or code.startswith(item) for item in codes_or_prefixes):
+            count += 1
+    return count
 
 
 def _neighbor_raw_map(raw_data_map, slide_no):
