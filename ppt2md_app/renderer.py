@@ -4,7 +4,7 @@ from .provenance import provenance_comment
 from .table_quality import assess_table, normalize_table_text
 
 
-RENDERER_VERSION = "markdown-first-renderer-2026-06-22-semantic-sections"
+RENDERER_VERSION = "markdown-first-renderer-2026-06-22-fallback-evidence"
 
 
 def render_page_ir_to_markdown(
@@ -69,7 +69,7 @@ def _render_block_body(block: Dict[str, Any], text: str) -> str:
     if block_type in ("paragraph", "formula_inline", "list"):
         return _strip_known_section_heading(text)
     if block_type == "table":
-        return _render_table(text)
+        return _render_table(block)
     if block_type == "formula_block":
         return _render_formula_block(block.get("latex") or text)
     if block_type == "figure_note":
@@ -129,23 +129,45 @@ def _render_uncertain(text: str) -> str:
 
 
 def _render_uncertain_formula(text: str) -> str:
-    return "> [!WARNING] 公式识别不确定\n" + "\n".join(f"> {line}" for line in text.splitlines())
+    rendered = ["> [!WARNING] 公式识别不确定", "> 原始识别："]
+    rendered.extend(f"> {line}" for line in text.splitlines())
+    return "\n".join(rendered)
 
 
-def _render_table(text: str) -> str:
+def _render_table(block: Dict[str, Any]) -> str:
+    text = (block.get("text") or "").strip()
     stripped = _strip_known_section_heading(text)
     quality = assess_table(stripped)
     if quality.reliable:
         return normalize_table_text(stripped)
 
     issue_lines = [issue.message for issue in quality.errors + quality.warnings]
+    image = _table_image_reference(block)
     rendered = ["> [!WARNING] 表格识别不确定"]
     for message in issue_lines[:3]:
         rendered.append(f"> {message}")
+    if image:
+        rendered.append("> 已保留表格截图引用。")
     rendered.append(">")
     rendered.append("> 原始识别：")
     rendered.extend(f"> {line}" for line in stripped.splitlines())
-    return "\n".join(rendered)
+    warning = "\n".join(rendered)
+    return f"{image}\n\n{warning}" if image else warning
+
+
+def _table_image_reference(block: Dict[str, Any]) -> str:
+    path = (
+        block.get("table_image_path")
+        or block.get("crop_path")
+        or block.get("image_path")
+        or block.get("path")
+        or ""
+    )
+    path = str(path).strip()
+    if not path:
+        return ""
+    alt = str(block.get("alt") or "table").strip()
+    return f"![{alt}]({path})"
 
 
 def _render_image_ref(block: Dict[str, Any]) -> str:

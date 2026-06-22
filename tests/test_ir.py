@@ -187,6 +187,7 @@ def test_uncertain_formula_renders_as_warning_block():
     assert markdown == (
         "# Slide 8\n\n"
         "> [!WARNING] 公式识别不确定\n"
+        "> 原始识别：\n"
         "> E = [?] mc^2\n"
     )
 
@@ -199,6 +200,25 @@ def test_unreliable_table_degrades_to_warning_block():
     assert markdown.startswith("# Slide 9\n\n> [!WARNING] 表格识别不确定\n")
     assert "Markdown 表格行列数不一致" in markdown
     assert "> | 1 | 2 | 3 |" in markdown
+
+
+def test_unreliable_table_with_image_path_keeps_markdown_image_reference():
+    markdown = render_blocks_to_markdown(
+        [
+            {
+                "type": "table",
+                "text": "| A | B |\n| --- | --- |\n| 1 | 2 | 3 |",
+                "table_image_path": "assets/tables/page-9-table-1.png",
+                "alt": "page 9 table 1",
+            }
+        ],
+        9,
+    )
+
+    assert markdown.startswith("# Slide 9\n\n![page 9 table 1](assets/tables/page-9-table-1.png)\n\n")
+    assert "> [!WARNING] 表格识别不确定" in markdown
+    assert "> 已保留表格截图引用。" in markdown
+    assert "> 原始识别：" in markdown
 
 
 def test_aligned_text_table_renders_as_markdown_table():
