@@ -167,7 +167,7 @@ def merge_markdowns(ppt_output_dir, ppt_name, allowed_slide_numbers=None):
                 meta = read_json(meta_path)
             except Exception:
                 continue
-            if meta.get("status") != "ok":
+            if meta.get("status") not in {"ok", "fail_open"}:
                 continue
         md_files.append(candidate)
     chunks = [

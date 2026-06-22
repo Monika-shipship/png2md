@@ -3,6 +3,7 @@ from pathlib import Path
 from time import perf_counter
 
 from .artifacts import (
+    build_fail_open_slide_meta,
     build_error_sidecar,
     build_raw_cache_record,
     build_slide_meta,
@@ -16,6 +17,7 @@ from .config import AppConfig
 from .files import merge_markdowns, read_json, write_json, write_text_atomic
 from .models import run_stage_1_vision, run_stage_2_brain_parallel, set_dashscope_api_key
 from .refiner import refine_slide_markdown
+from .renderer import render_blocks_to_markdown
 from .reporting import build_run_report, finalize_run_report, refresh_page_suspects, stage_blocked, stage_failed, summarize_blocks
 from .validators import first_api_error_prefix, is_api_error_text, validate_slide_markdown
 
@@ -374,8 +376,24 @@ def _run_brain_stage(
                     refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
                     if not validation.ok:
                         message = "; ".join(issue.message for issue in validation.errors)
-                        stage_failed(page, "stage2", "validation_failed", message)
                         page["stage2"]["elapsed_seconds"] = round(perf_counter() - started_at, 3)
+                        if _write_stage2_fail_open_markdown(
+                            ppt_root=ppt_root,
+                            slide_no=slide_no,
+                            code="validation_failed",
+                            message=message,
+                            raw_data_map=raw_data_map,
+                            target_blocks=target_blocks_by_slide.get(slide_no),
+                            config=config,
+                            page=page,
+                            raw_response=result.get("raw_response"),
+                            source_validation=validation.to_dict(),
+                        ):
+                            ok_slides.append(slide_no)
+                            refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
+                            msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组失败，已写入保守 Markdown fallback"))
+                            continue
+                        stage_failed(page, "stage2", "validation_failed", message)
                         page["final"].update({"status": "failed", "reason": "stage2_validation_failed"})
                         refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
                         _write_stage2_failure(ppt_root, slide_no, "validation_failed", message, validation=validation.to_dict())
@@ -405,18 +423,47 @@ def _run_brain_stage(
                 else:
                     message = result.get("error") or "Unknown Stage 2 error."
                     code = result.get("error_code") or first_api_error_prefix(message) or "stage2_failed"
-                    stage_failed(page, "stage2", code, message)
                     page["stage2"]["elapsed_seconds"] = round(perf_counter() - started_at, 3)
+                    if _write_stage2_fail_open_markdown(
+                        ppt_root=ppt_root,
+                        slide_no=slide_no,
+                        code=code,
+                        message=message,
+                        raw_data_map=raw_data_map,
+                        target_blocks=target_blocks_by_slide.get(slide_no),
+                        config=config,
+                        page=page,
+                        raw_response=result.get("raw_response"),
+                    ):
+                        ok_slides.append(slide_no)
+                        refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
+                        msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组失败，已写入保守 Markdown fallback"))
+                        continue
+                    stage_failed(page, "stage2", code, message)
                     page["final"].update({"status": "failed", "reason": "stage2_failed"})
-                    refresh_page_suspects(page)
+                    refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
                     _write_stage2_failure(ppt_root, slide_no, code, message, raw_response=result.get("raw_response"))
                     failed += 1
             except Exception as e:
                 msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组异常: {e}"))
-                stage_failed(page, "stage2", "stage2_exception", str(e))
                 page["stage2"]["elapsed_seconds"] = round(perf_counter() - started_at, 3)
+                if _write_stage2_fail_open_markdown(
+                    ppt_root=ppt_root,
+                    slide_no=slide_no,
+                    code="stage2_exception",
+                    message=str(e),
+                    raw_data_map=raw_data_map,
+                    target_blocks=target_blocks_by_slide.get(slide_no),
+                    config=config,
+                    page=page,
+                ):
+                    ok_slides.append(slide_no)
+                    refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
+                    msg_queue.put(("log", f"[{ppt_name}] P{slide_no} 重组异常，已写入保守 Markdown fallback"))
+                    continue
+                stage_failed(page, "stage2", "stage2_exception", str(e))
                 page["final"].update({"status": "failed", "reason": "stage2_exception"})
-                refresh_page_suspects(page)
+                refresh_page_suspects(page, target_blocks_by_slide.get(slide_no))
                 _write_stage2_failure(ppt_root, slide_no, "stage2_exception", str(e))
                 failed += 1
             finally:
@@ -454,6 +501,97 @@ def _write_stage2_failure(ppt_root, slide_no, code, message, validation=None, ra
             "validation": validation,
         },
     )
+
+
+def _write_stage2_fail_open_markdown(
+    *,
+    ppt_root,
+    slide_no,
+    code,
+    message,
+    raw_data_map,
+    target_blocks,
+    config: AppConfig,
+    page,
+    raw_response=None,
+    source_validation=None,
+) -> bool:
+    if not target_blocks:
+        return False
+
+    body = _strip_slide_heading(render_blocks_to_markdown(target_blocks, slide_no), slide_no)
+    markdown = (
+        f"# Slide {slide_no}\n\n"
+        "> [!WARNING] Stage 2 重组失败，已使用 Stage 1 确定性 Markdown fallback。\n"
+        f"> 原因：{_one_line_error(code, message)}\n\n"
+        f"{body}"
+    ).rstrip() + "\n"
+
+    validation = validate_slide_markdown(
+        markdown,
+        slide_no,
+        raw_response=None,
+        target_raw=raw_data_map.get(slide_no),
+        target_blocks=target_blocks,
+        neighbor_raw=_neighbor_raw_map(raw_data_map, slide_no),
+    )
+    if not validation.ok:
+        return False
+
+    output_path = ppt_root / f"Slide_{slide_no:02d}.md"
+    meta_path = ppt_root / f"Slide_{slide_no:02d}.meta.json"
+    write_text_atomic(output_path, markdown)
+    write_json(
+        meta_path,
+        build_fail_open_slide_meta(
+            slide_no,
+            markdown,
+            validation.to_dict(),
+            raw_data_map,
+            config,
+            code=code,
+            message=message,
+            fallback_source="stage1_page_ir",
+        ),
+    )
+    write_json(
+        ppt_root / f"Slide_{slide_no:02d}.error.json",
+        build_error_sidecar(
+            slide_no,
+            "stage2",
+            code,
+            message,
+            validation=source_validation,
+            raw_response=raw_response,
+            fallback={"source": "stage1_page_ir", "markdown_path": str(output_path)},
+        ),
+    )
+
+    stage_failed(page, "stage2", code, message)
+    page["stage2"].update(
+        {
+            "sha256": sha256_text(markdown),
+            "fallback": "stage1_page_ir",
+        }
+    )
+    page["validation"] = validation.to_dict()
+    page["refiner"] = {"changed": False, "applied_ops": [], "dismissed": []}
+    page["final"].update({"status": "fail_open", "reason": code})
+    return True
+
+
+def _strip_slide_heading(markdown: str, slide_no: int) -> str:
+    lines = (markdown or "").splitlines()
+    if lines and lines[0].strip().lower() == f"# slide {slide_no}".lower():
+        return "\n".join(lines[1:]).strip() + "\n"
+    return (markdown or "").strip() + "\n"
+
+
+def _one_line_error(code: str, message: str) -> str:
+    text = " ".join(str(message or "").split())
+    if len(text) > 180:
+        text = text[:177].rstrip() + "..."
+    return f"{code}: {text}" if text else str(code)
 
 
 def _neighbor_raw_map(raw_data_map, slide_no):

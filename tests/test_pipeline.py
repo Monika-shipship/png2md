@@ -69,6 +69,63 @@ def test_brain_stage_error_does_not_write_normal_markdown(monkeypatch, tmp_path)
     assert page_reports[1]["suspects"][0]["op_hint"] == "mark_failed_page"
 
 
+def test_brain_stage_error_writes_markdown_fail_open_when_stage1_blocks_exist(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "热力学第一定律描述内能、热量和功之间的关系。"}
+    target_blocks = {
+        1: [
+            {
+                "id": "p0001-b001",
+                "type": "paragraph",
+                "text": raw_data_map[1],
+                "source_page": 1,
+                "confidence": 0.8,
+                "origin": "vision_ocr",
+                "evidence": {"raw_text": raw_data_map[1]},
+                "bbox": None,
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": False,
+            "slide_no": slide_no,
+            "error": "Brain Error: 500",
+            "error_code": "Brain Error",
+            "raw_response": "Brain Error: 500",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    assert ok_slides == [1]
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# Slide 1\n\n> [!WARNING] Stage 2 重组失败")
+    assert "热力学第一定律" in markdown
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert meta["status"] == "fail_open"
+    assert meta["fallback"]["source"] == "stage1_page_ir"
+    assert page_reports[1]["final"]["status"] == "fail_open"
+    assert page_reports[1]["stage2"]["status"] == "failed"
+    assert page_reports[1]["stage2"]["fallback"] == "stage1_page_ir"
+
+
 def test_brain_stage_records_checked_refiner_ops(monkeypatch, tmp_path):
     config = AppConfig(brain_batch_workers=1)
     report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)

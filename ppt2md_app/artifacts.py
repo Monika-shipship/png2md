@@ -148,6 +148,44 @@ def build_slide_meta(
     }
 
 
+def build_fail_open_slide_meta(
+    slide_no: int,
+    markdown: str,
+    validation: Dict[str, Any],
+    raw_data_map: Dict[int, str],
+    config: AppConfig,
+    *,
+    code: str,
+    message: str,
+    fallback_source: str,
+) -> Dict[str, Any]:
+    fingerprint = stage2_fingerprint(slide_no, raw_data_map, config)
+    return {
+        "schema_version": SLIDE_META_SCHEMA_VERSION,
+        "status": "fail_open",
+        "slide_no": slide_no,
+        "markdown_sha256": sha256_text(markdown),
+        "validation": validation,
+        "refiner": {"changed": False, "applied_ops": [], "dismissed": []},
+        "error": {"code": code, "message": message},
+        "fallback": {
+            "source": fallback_source,
+            "note": "Markdown was generated from Stage 1 Page IR because Stage 2 did not produce a trusted result.",
+        },
+        "metadata": {
+            "created_at": now_iso(),
+            "pipeline_version": PNG2MD_PIPELINE_VERSION,
+            "prompt": {
+                "stage": "stage2",
+                "version": PROMPT_STAGE_2_VERSION,
+                "sha256": fingerprint["prompt_sha256"],
+            },
+            "model": fingerprint["model"],
+        },
+        "fingerprint": fingerprint,
+    }
+
+
 def build_error_sidecar(slide_no: int, stage: str, code: str, message: str, **extra) -> Dict[str, Any]:
     return {
         "schema_version": 1,

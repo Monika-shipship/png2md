@@ -27,13 +27,16 @@ def test_write_json_is_readable(tmp_path):
 def test_merge_markdowns_uses_exact_slide_names_and_ok_meta(tmp_path):
     (tmp_path / "Slide_01.md").write_text("# Slide 1\n\nok\n", encoding="utf-8")
     write_json(tmp_path / "Slide_01.meta.json", {"status": "ok"})
-    (tmp_path / "Slide_02.md").write_text("# Slide 2\n\nfailed\n", encoding="utf-8")
-    write_json(tmp_path / "Slide_02.meta.json", {"status": "failed"})
+    (tmp_path / "Slide_02.md").write_text("# Slide 2\n\nfallback\n", encoding="utf-8")
+    write_json(tmp_path / "Slide_02.meta.json", {"status": "fail_open"})
+    (tmp_path / "Slide_04.md").write_text("# Slide 4\n\nfailed\n", encoding="utf-8")
+    write_json(tmp_path / "Slide_04.meta.json", {"status": "failed"})
     (tmp_path / "Slide_03.failed.md").write_text("# Slide 3\n\nbad\n", encoding="utf-8")
 
-    merge_markdowns(tmp_path, "Deck", allowed_slide_numbers=[1, 2, 3])
+    merge_markdowns(tmp_path, "Deck", allowed_slide_numbers=[1, 2, 3, 4])
 
     merged = (tmp_path / "Deck_FULL.md").read_text(encoding="utf-8")
     assert "# Slide 1" in merged
-    assert "# Slide 2" not in merged
+    assert "# Slide 2" in merged
     assert "# Slide 3" not in merged
+    assert "# Slide 4" not in merged
