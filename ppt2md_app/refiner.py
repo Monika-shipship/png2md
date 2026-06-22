@@ -691,6 +691,8 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any]) -> list[str]:
         block_id = block.get("id")
         if not block_id:
             errors.append(f"block_{index}_missing_id")
+        elif not _valid_block_id(block_id, page_ir.get("source_page")):
+            errors.append(f"block_{index}_invalid_id")
         elif block_id in seen:
             errors.append(f"block_{index}_duplicate_id")
         seen.add(block_id)
@@ -727,6 +729,13 @@ def _page_ir_contract_errors(page_ir: Dict[str, Any]) -> list[str]:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _valid_block_id(value, source_page) -> bool:
+    if not isinstance(value, str):
+        return False
+    page = int(source_page or 0)
+    return bool(re.fullmatch(rf"p{page:04d}-b\d{{3}}", value))
 
 
 def _valid_bbox(value) -> bool:

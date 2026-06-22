@@ -395,3 +395,35 @@ def test_block_op_checked_rejects_page_ir_raw_text_hash_mismatch():
     assert refined == page_ir
     assert detail["reason"] == "page_ir_contract_failed"
     assert "raw_text_sha256_mismatch" in detail["errors"]
+
+
+def test_block_op_checked_rejects_invalid_block_id_format():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 18)
+    page_ir["blocks"][1]["id"] = "block-2"
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0018-b001"},
+        slide_no=18,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "block_1_invalid_id" in detail["errors"]
+
+
+def test_block_op_checked_rejects_cross_page_block_id_prefix():
+    page_ir = build_page_ir("普通正文\n\n后续正文。", 19)
+    page_ir["blocks"][1]["id"] = "p0020-b002"
+
+    refined, applied, detail = apply_block_op_checked(
+        page_ir,
+        {"op": "promote_heading", "id": "p0019-b001"},
+        slide_no=19,
+    )
+
+    assert applied is False
+    assert refined == page_ir
+    assert detail["reason"] == "page_ir_contract_failed"
+    assert "block_1_invalid_id" in detail["errors"]
