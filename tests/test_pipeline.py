@@ -14,6 +14,27 @@ class DummyQueue:
         self.items.append(item)
 
 
+FORBIDDEN_USER_MARKDOWN_FRAGMENTS = (
+    "> [!WARNING]",
+    "Stage 2 重组失败",
+    "原因：",
+    "质量警告",
+    "原始识别：",
+    "原始识别已按纯文本保留",
+    "原文勘误",
+    "思考过程",
+    "错误过程",
+    "注：手写看似",
+    "OCR 正文覆盖率",
+    "覆盖率偏低",
+)
+
+
+def assert_clean_user_markdown(markdown: str):
+    for fragment in FORBIDDEN_USER_MARKDOWN_FRAGMENTS:
+        assert fragment not in markdown
+
+
 def test_vision_stage_rejects_legacy_cache_and_rewrites_v1(monkeypatch, tmp_path):
     image = tmp_path / "page.png"
     image.write_bytes(b"fake image")
@@ -118,7 +139,8 @@ def test_brain_stage_error_writes_markdown_fail_open_when_stage1_blocks_exist(mo
 
     assert ok_slides == [1]
     markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
-    assert markdown.startswith("# Slide 1\n\n> [!WARNING] Stage 2 重组失败")
+    assert markdown.startswith("# Slide 1\n\n热力学第一定律")
+    assert_clean_user_markdown(markdown)
     assert "热力学第一定律" in markdown
     meta = read_json(tmp_path / "Slide_01.meta.json")
     assert meta["status"] == "fail_open"
@@ -177,7 +199,7 @@ def test_brain_stage_low_ocr_coverage_uses_markdown_fail_open(monkeypatch, tmp_p
     assert ok_slides == [1]
     markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
     meta = read_json(tmp_path / "Slide_01.meta.json")
-    assert "Stage 2 重组失败" in markdown
+    assert_clean_user_markdown(markdown)
     assert "热力学第一定律" in markdown
     assert "简短摘要" not in markdown
     assert meta["status"] == "fail_open"
@@ -411,7 +433,7 @@ def test_brain_stage_missing_target_uncertain_block_uses_page_ir_fallback(monkey
     assert ok_slides == [1]
     assert meta["status"] == "fail_open"
     assert meta["error"]["code"] == "target_uncertain_block_missing"
-    assert "> [!WARNING] 识别不确定" in markdown
+    assert_clean_user_markdown(markdown)
     assert "此处手写文字疑似为配分函数" in markdown
 
 
@@ -491,7 +513,7 @@ def test_brain_stage_formula_warning_falls_back_to_conservative_formula_warning(
     assert ok_slides == [1]
     assert meta["status"] == "fail_open"
     assert meta["error"]["code"] == "latex_frac_missing_braces"
-    assert "> [!WARNING] 公式识别不确定" in markdown
+    assert_clean_user_markdown(markdown)
     assert "\\frac a}{b" in markdown
     assert "$$\n\\frac a}{b\n$$" not in markdown
     assert page_reports[1]["final"]["status"] == "fail_open"
@@ -638,7 +660,7 @@ def test_brain_stage_missing_target_formula_block_uses_page_ir_fallback(monkeypa
     assert ok_slides == [1]
     assert meta["status"] == "fail_open"
     assert meta["error"]["code"] == "target_formula_block_missing"
-    assert "Stage 2 重组失败" in markdown
+    assert_clean_user_markdown(markdown)
     assert "\\begin{aligned}" in markdown
     assert "\\frac{3}{2} N k \\ln T" in markdown
     assert page_reports[1]["final"]["status"] == "fail_open"
@@ -754,7 +776,7 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
                 "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
                 "### Formula\n"
                 "$$\n"
-                "\\frac a}{b\n"
+                "E = mc^2\n"
                 "$$\n\n"
                 "### Table Analysis\n"
                 "| A | B |\n"
@@ -774,41 +796,25 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
             "markdown": (
                 "# Slide 1\n\n"
                 "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
-                "> [!WARNING] 公式识别不确定\n"
-                "> 原始识别：\n"
-                "> $$\n"
-                "> \\frac a}{b\n"
-                "> $$\n\n"
-                "> [!WARNING] 表格识别不确定\n"
-                "> Markdown 表格结构不可靠，已保留原始识别。\n"
-                ">\n"
-                "> 原始识别已按纯文本保留，未作为可信表格渲染。\n\n"
+                "$$\nE = mc^2\n$$\n\n"
                 "```text\n"
                 "| A | B |\n"
                 "| --- | --- |\n"
                 "| 1 | 2 | 3 |\n"
                 "```\n\n"
-                "> [!WARNING] 图示识别不确定\n"
+                "> [!NOTE] 图示说明\n"
                 "> 图示被遮挡，无法确定节点和箭头方向。\n"
             ),
             "raw_response": (
                 "# Slide 1\n\n"
                 "热力学第一定律描述内能、热量和功之间的关系。孤立系统的总能量保持守恒。\n\n"
-                "> [!WARNING] 公式识别不确定\n"
-                "> 原始识别：\n"
-                "> $$\n"
-                "> \\frac a}{b\n"
-                "> $$\n\n"
-                "> [!WARNING] 表格识别不确定\n"
-                "> Markdown 表格结构不可靠，已保留原始识别。\n"
-                ">\n"
-                "> 原始识别已按纯文本保留，未作为可信表格渲染。\n\n"
+                "$$\nE = mc^2\n$$\n\n"
                 "```text\n"
                 "| A | B |\n"
                 "| --- | --- |\n"
                 "| 1 | 2 | 3 |\n"
                 "```\n\n"
-                "> [!WARNING] 图示识别不确定\n"
+                "> [!NOTE] 图示说明\n"
                 "> 图示被遮挡，无法确定节点和箭头方向。\n"
             ),
         },
@@ -839,13 +845,13 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
     assert report["summary"]["provenance"]["generated_description_count"] == 1
     assert report["summary"]["figure_count"] == 1
     assert report["summary"]["figure_warning_count"] == 1
-    assert report["summary"]["formula_warning_count"] >= 1
+    assert report["summary"]["formula_warning_count"] == 0
     assert report["summary"]["table_warning_count"] == 1
     assert report["summary"]["ocr_coverage_warning_count"] == 0
     assert report["summary"]["suspects"]["by_code"]["table_quality_warning"] == 1
-    assert report["summary"]["suspects"]["by_code"]["latex_frac_missing_braces"] >= 1
-    assert report["summary"]["suspects"]["by_op"]["mark_uncertain"] >= 2
-    assert report["summary"]["suspects"]["actionable_total"] >= 3
+    assert "latex_frac_missing_braces" not in report["summary"]["suspects"]["by_code"]
+    assert report["summary"]["suspects"]["by_op"]["mark_uncertain"] >= 1
+    assert report["summary"]["suspects"]["actionable_total"] >= 2
     assert "ocr_coverage_low" not in {issue["code"] for issue in report["pages"][0]["validation"]["warnings"]}
     assert any(suspect.get("block_id") and suspect.get("op") for suspect in report["pages"][0]["suspects"])
     assert report["pages"][0]["stage1"]["blocks_count"] >= 1
@@ -856,13 +862,86 @@ def test_process_single_ppt_task_writes_report_and_full_markdown(monkeypatch, tm
         for warning in report["pages"][0]["quality"]["warnings"]
         if str(warning.get("code") or "").startswith("formula_") or str(warning.get("code") or "").startswith("latex_")
     ]
-    assert {warning["code"] for warning in formula_warnings} == {"latex_frac_missing_braces"}
+    assert {warning["code"] for warning in formula_warnings} == set()
     assert report["pages"][0]["quality"]["figure_warning_count"] == 1
     assert report["pages"][0]["quality"]["table_warning_count"] == 1
     assert raw["blocks"]
     assert raw["provenance"]["summary"]["origin_counts"]["refiner_op"] == 1
     assert raw["block_refiner"]["applied_ops"][0]["after_block_ids"]
-    assert "# Slide 1" in (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
+    slide_markdown = (deck_dir / "Slide_01.md").read_text(encoding="utf-8")
+    full_markdown = (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
+    assert_clean_user_markdown(slide_markdown)
+    assert_clean_user_markdown(full_markdown)
+    assert "# Slide 1" in full_markdown
+
+
+def test_process_single_ppt_task_rejects_dirty_diagnostic_markdown(monkeypatch, tmp_path):
+    image = tmp_path / "page.png"
+    image.write_bytes(b"fake image")
+    output = tmp_path / "out"
+    config = AppConfig(output_folder=str(output), vision_batch_workers=1, brain_batch_workers=1)
+    raw_text = (
+        "热力学第一定律描述内能、热量和功之间的关系。\n\n"
+        "### Formula\n"
+        "E = [?] mc^2"
+    )
+
+    monkeypatch.setattr(pipeline, "set_dashscope_api_key", lambda config: None)
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_1_vision",
+        lambda img_path, slide_no, ppt_name, msg_queue, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "raw_text": raw_text,
+        },
+    )
+    dirty_markdown = (
+        "# Slide 1\n\n"
+        "热力学第一定律描述内能、热量和功之间的关系。\n\n"
+        "> [!WARNING] 公式识别不确定\n"
+        "> 原始识别：\n"
+        "> E = [?] mc^2\n"
+        ">\n"
+        "> 质量警告：\n"
+        "> - 公式中包含不确定识别标记。\n"
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": dirty_markdown,
+            "raw_response": dirty_markdown,
+        },
+    )
+
+    result = pipeline.process_single_ppt_task(
+        "Deck",
+        {"images": [str(image)], "range_start": 0, "range_end": 1, "task_id": 1},
+        DummyQueue(),
+        config,
+    )
+
+    assert result == "Deck Done"
+    deck_dir = output / "Deck"
+    slide_markdown = (deck_dir / "Slide_01.md").read_text(encoding="utf-8")
+    full_markdown = (deck_dir / "Deck_FULL.md").read_text(encoding="utf-8")
+    report = read_json(deck_dir / "run_report.json")
+    error = read_json(deck_dir / "Slide_01.error.json")
+
+    assert report["status"] == "fail_open"
+    assert report["summary"]["markdown_source_counts"] == {"stage1_page_ir": 1}
+    assert report["pages"][0]["final"]["status"] == "fail_open"
+    assert read_json(deck_dir / "Slide_01.meta.json")["status"] == "fail_open"
+    assert "![page evidence](evidence/Slide_01.png)" in slide_markdown
+    assert (deck_dir / "evidence" / "Slide_01.png").exists()
+    assert "E = [?] mc^2" in slide_markdown
+    assert "E = [?] mc^2" in full_markdown
+    assert_clean_user_markdown(slide_markdown)
+    assert_clean_user_markdown(full_markdown)
+    assert "> [!WARNING] 公式识别不确定" in error["raw_response"]
 
 
 def test_process_single_ppt_task_reports_fail_open_markdown(monkeypatch, tmp_path):
@@ -917,5 +996,7 @@ def test_process_single_ppt_task_reports_fail_open_markdown(monkeypatch, tmp_pat
     assert report["pages"][0]["final"]["markdown_source"]["kind"] == "stage1_page_ir"
     assert read_json(deck_dir / "Slide_01.meta.json")["status"] == "fail_open"
     assert "# Slide 1" in full_markdown
-    assert "Stage 2 重组失败" in full_markdown
+    assert "![page evidence](evidence/Slide_01.png)" in full_markdown
+    assert (deck_dir / "evidence" / "Slide_01.png").exists()
+    assert_clean_user_markdown(full_markdown)
     assert "热力学第一定律" in full_markdown

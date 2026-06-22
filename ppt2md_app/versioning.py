@@ -1,3 +1,3 @@
 """Compatibility versions for generated png2md artifacts."""
 
-PNG2MD_PIPELINE_VERSION = "2026.06.22-v23-formula-table-render"
+PNG2MD_PIPELINE_VERSION = "2026.06.22-v24-clean-markdown-evidence"

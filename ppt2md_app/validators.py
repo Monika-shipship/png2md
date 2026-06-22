@@ -388,8 +388,9 @@ def _target_table_block_warning(markdown: str, markdown_norm: str, block: dict, 
 def _target_figure_block_warning(markdown: str, markdown_norm: str, block: dict, slide_no: int) -> ValidationIssue | None:
     source = _figure_source_text(block)
     source_norm = _normalize_block_text_for_coverage(source)
-    has_note = _has_figure_note(markdown)
-    if not has_note:
+    if len(source_norm) < BLOCK_COVERAGE_MIN_CHARS:
+        if _has_figure_note(markdown) or _any_ref_present(markdown, _block_image_refs(block)):
+            return None
         return _issue(
             "target_figure_block_missing",
             "warning",
@@ -397,8 +398,6 @@ def _target_figure_block_warning(markdown: str, markdown_norm: str, block: dict,
             slide_no,
             _block_evidence(block, 0.0, source),
         )
-    if len(source_norm) < BLOCK_COVERAGE_MIN_CHARS:
-        return None
     ratio = _block_match_ratio(source_norm, markdown_norm)
     if ratio >= FIGURE_BLOCK_MATCH_RATIO:
         return None
@@ -414,24 +413,23 @@ def _target_figure_block_warning(markdown: str, markdown_norm: str, block: dict,
 def _target_uncertain_block_warning(markdown: str, markdown_norm: str, block: dict, slide_no: int) -> ValidationIssue | None:
     source = _block_source_text(block)
     source_norm = _normalize_block_text_for_coverage(source)
-    has_uncertain_marker = "> [!WARNING] 识别不确定" in markdown or "识别不确定" in markdown
-    if not has_uncertain_marker:
+    if len(source_norm) < BLOCK_COVERAGE_MIN_CHARS:
+        if _any_ref_present(markdown, _block_image_refs(block)):
+            return None
         return _issue(
             "target_uncertain_block_missing",
             "warning",
-            "最终 Markdown 遗漏或未显式标注当前页 Stage 1 识别到的不确定内容块。",
+            "最终 Markdown 遗漏了当前页 Stage 1 识别到的不确定内容块。",
             slide_no,
             _block_evidence(block, 0.0, source),
         )
-    if len(source_norm) < BLOCK_COVERAGE_MIN_CHARS:
-        return None
     ratio = _block_match_ratio(source_norm, markdown_norm)
     if ratio >= UNCERTAIN_BLOCK_MATCH_RATIO:
         return None
     return _issue(
         "target_uncertain_block_missing",
         "warning",
-        "最终 Markdown 的不确定内容块未覆盖当前页 Stage 1 识别到的原始内容。",
+        "最终 Markdown 未覆盖当前页 Stage 1 识别到的不确定原始内容。",
         slide_no,
         _block_evidence(block, ratio, source),
     )
@@ -522,7 +520,6 @@ def _has_figure_note(text: str) -> bool:
     return (
         "> [!NOTE] Figure 描述" in text
         or "> [!NOTE] 图示说明" in text
-        or "> [!WARNING] 图示识别不确定" in text
     )
 
 

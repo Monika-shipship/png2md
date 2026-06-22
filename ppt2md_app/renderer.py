@@ -149,34 +149,21 @@ def _render_figure_note(block: Dict[str, Any]) -> str:
 
     if block.get("unrecognizable") or figure.get("unrecognizable") or _has_figure_uncertain_marker(text):
         body = lines or ["图示不可可靠识别。"]
-        rendered.append("> [!WARNING] 图示识别不确定\n" + "\n".join(f"> {line}" for line in body))
+        rendered.extend(body)
     elif detail_lines:
         rendered.append("> [!NOTE] 图示说明\n" + "\n".join(f"> {line}" for line in detail_lines))
     else:
-        rendered.append("> [!WARNING] 图示识别不确定\n> Figure Analysis 为空。")
+        rendered.append("图示说明缺失。")
     return "\n\n".join(rendered)
 
 
 def _render_uncertain(text: str) -> str:
-    stripped = _strip_known_section_heading(text)
-    return "> [!WARNING] 识别不确定\n" + "\n".join(f"> {line}" for line in stripped.splitlines())
+    return _strip_known_section_heading(text)
 
 
 def _render_uncertain_formula(block: Dict[str, Any], text: str, warnings: list | None = None) -> str:
     image = _formula_image_reference(block)
-    rendered = ["> [!WARNING] 公式识别不确定", "> 原始识别："]
-    rendered.extend(f"> {line}" for line in text.splitlines())
-    warning_messages = []
-    for warning in warnings or []:
-        if isinstance(warning, dict):
-            message = warning.get("message") or warning.get("code")
-            if message:
-                warning_messages.append(str(message))
-    if warning_messages:
-        rendered.append(">")
-        rendered.append("> 质量警告：")
-        rendered.extend(f"> - {message}" for message in warning_messages[:4])
-    body = "\n".join(rendered)
+    body = (text or "").strip()
     return f"{image}\n\n{body}" if image else body
 
 
@@ -221,23 +208,13 @@ def _render_table(block: Dict[str, Any]) -> str:
     table_format = str(block.get("table_format") or quality.table_format)
     if table_format == "image_only":
         image = _table_image_reference(block)
-        warning = "> [!WARNING] 表格识别不确定\n> 表格仅保留截图引用，未生成可靠结构化表格。"
-        return f"{image}\n\n{warning}" if image else warning
+        return image
     if quality.reliable:
         return normalize_table_text(stripped)
 
-    issue_lines = [issue.message for issue in quality.errors + quality.warnings]
     image = _table_image_reference(block)
-    rendered = ["> [!WARNING] 表格识别不确定"]
-    for message in issue_lines[:3]:
-        rendered.append(f"> {message}")
-    if image:
-        rendered.append("> 已保留表格截图引用。")
-    rendered.append(">")
-    rendered.append("> 原始识别已按纯文本保留，未作为可信表格渲染。")
-    warning = "\n".join(rendered)
     raw = _fenced_plain_text(stripped) if stripped else ""
-    body = f"{warning}\n\n{raw}" if raw else warning
+    body = raw or stripped
     return f"{image}\n\n{body}" if image else body
 
 

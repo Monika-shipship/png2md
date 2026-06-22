@@ -132,7 +132,7 @@ def test_figure_links_to_same_page_formula_block():
     assert block["figure"]["linked_blocks"] == ["p0020-b001"]
 
 
-def test_unrecognizable_figure_renders_as_warning_block():
+def test_unrecognizable_figure_renders_clean_text_without_warning_block():
     raw = "### Figure Analysis\n图示被遮挡，无法确定节点和箭头方向。"
 
     ir = build_page_ir(raw, 10)
@@ -142,8 +142,7 @@ def test_unrecognizable_figure_renders_as_warning_block():
     assert ir["blocks"][0]["confidence"] == 0.25
     assert markdown == (
         "# Slide 10\n\n"
-        "> [!WARNING] 图示识别不确定\n"
-        "> 图示被遮挡，无法确定节点和箭头方向。\n"
+        "图示被遮挡，无法确定节点和箭头方向。\n"
     )
 
 
@@ -242,20 +241,14 @@ def test_compact_chinese_semantic_section_heading_is_recognized():
     assert render_page_ir_to_markdown(ir) == "# Slide 18\n\n**例题：**\n\n计算 $\\int_0^1 x dx$。\n"
 
 
-def test_uncertain_formula_renders_as_warning_block():
+def test_uncertain_formula_renders_clean_raw_text_without_warning_block():
     ir = build_page_ir("### Formula\nE = [?] mc^2", 8)
     markdown = render_page_ir_to_markdown(ir)
 
     assert ir["blocks"][0]["formula_quality"]["warnings"][0]["code"] == "formula_uncertain_marker"
-    assert markdown == (
-        "# Slide 8\n\n"
-        "> [!WARNING] 公式识别不确定\n"
-        "> 原始识别：\n"
-        "> E = [?] mc^2\n"
-        ">\n"
-        "> 质量警告：\n"
-        "> - 公式中包含不确定识别标记。\n"
-    )
+    assert markdown == "# Slide 8\n\nE = [?] mc^2\n"
+    assert "> [!WARNING]" not in markdown
+    assert "质量警告" not in markdown
 
 
 def test_uncertain_formula_with_page_evidence_renders_image_reference():
@@ -263,16 +256,18 @@ def test_uncertain_formula_with_page_evidence_renders_image_reference():
 
     markdown = render_page_ir_to_markdown(ir)
 
-    assert markdown.startswith("# Slide 8\n\n![formula](assets/pages/page-8.png)\n\n> [!WARNING] 公式识别不确定")
+    assert markdown == "# Slide 8\n\n![formula](assets/pages/page-8.png)\n\nE = [?] mc^2\n"
+    assert "> [!WARNING]" not in markdown
 
 
-def test_unreliable_table_degrades_to_warning_block():
+def test_unreliable_table_degrades_to_clean_raw_text():
     raw = "### Table Analysis\n| A | B |\n| --- | --- |\n| 1 | 2 | 3 |"
 
     markdown = render_page_ir_to_markdown(build_page_ir(raw, 9))
 
-    assert markdown.startswith("# Slide 9\n\n> [!WARNING] 表格识别不确定\n")
-    assert "Markdown 表格行列数不一致" in markdown
+    assert markdown.startswith("# Slide 9\n\n```text\n")
+    assert "> [!WARNING]" not in markdown
+    assert "Markdown 表格行列数不一致" not in markdown
     assert "```text\n| A | B |\n| --- | --- |\n| 1 | 2 | 3 |\n```" in markdown
 
 
@@ -290,9 +285,10 @@ def test_unreliable_table_with_image_path_keeps_markdown_image_reference():
     )
 
     assert markdown.startswith("# Slide 9\n\n![page 9 table 1](assets/tables/page-9-table-1.png)\n\n")
-    assert "> [!WARNING] 表格识别不确定" in markdown
-    assert "> 已保留表格截图引用。" in markdown
-    assert "> 原始识别已按纯文本保留" in markdown
+    assert "> [!WARNING]" not in markdown
+    assert "已保留表格截图引用" not in markdown
+    assert "原始识别已按纯文本保留" not in markdown
+    assert "```text\n| A | B |\n| --- | --- |\n| 1 | 2 | 3 |\n```" in markdown
 
 
 def test_aligned_text_table_renders_as_markdown_table():

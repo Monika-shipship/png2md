@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import shutil
 from pathlib import Path
 from time import perf_counter
 
@@ -15,7 +16,7 @@ from .artifacts import (
 )
 from .config import AppConfig
 from .files import merge_markdowns, read_json, write_json, write_text_atomic
-from .models import run_stage_1_vision, run_stage_2_brain_parallel, set_dashscope_api_key
+from .models import run_stage_1_vision, run_stage_2_brain_parallel, sanitize_user_invisible_diagnostics, set_dashscope_api_key
 from .refiner import refine_slide_markdown
 from .renderer import render_blocks_to_markdown
 from .reporting import build_run_report, finalize_run_report, refresh_page_suspects, stage_blocked, stage_failed, summarize_blocks
@@ -397,7 +398,7 @@ def _run_brain_stage(
                 _apply_stage_provider_audit(page, "stage2", provider_audit)
 
                 if result.get("success"):
-                    final_markdown = result.get("markdown") or ""
+                    final_markdown = sanitize_user_invisible_diagnostics(result.get("markdown") or "")
                     refine_result = refine_slide_markdown(
                         final_markdown,
                         slide_no,
@@ -593,6 +594,7 @@ def _write_stage2_fail_open_markdown(
     provider_audit=None,
 ) -> bool:
     fallback = _build_stage2_fallback_markdown(
+        ppt_root=ppt_root,
         slide_no=slide_no,
         code=code,
         message=message,
@@ -652,17 +654,20 @@ def _write_stage2_fail_open_markdown(
     return True
 
 
-def _build_stage2_fallback_markdown(*, slide_no, code, message, raw_data_map, target_blocks):
+def _build_stage2_fallback_markdown(*, ppt_root=None, slide_no, code, message, raw_data_map, target_blocks):
     if not target_blocks:
         return None
 
-    body = _strip_slide_heading(render_blocks_to_markdown(target_blocks, slide_no), slide_no)
-    markdown = (
-        f"# Slide {slide_no}\n\n"
-        "> [!WARNING] Stage 2 重组失败，已使用 Stage 1 确定性 Markdown fallback。\n"
-        f"> 原因：{_one_line_error(code, message)}\n\n"
-        f"{body}"
-    ).rstrip() + "\n"
+    page_ref = _first_page_image_ref(target_blocks)
+    relative_ref = _copy_page_evidence(page_ref, Path(ppt_root), slide_no) if ppt_root and page_ref else None
+    render_blocks = _blocks_without_duplicate_page_evidence(target_blocks, page_ref)
+    body = _strip_slide_heading(render_blocks_to_markdown(render_blocks, slide_no), slide_no)
+    image_ref = _page_evidence_markdown(relative_ref)
+    markdown = f"# Slide {slide_no}\n\n"
+    if image_ref:
+        markdown += f"{image_ref}\n\n"
+    markdown += body
+    markdown = markdown.rstrip() + "\n"
 
     validation = validate_slide_markdown(
         markdown,
@@ -675,18 +680,55 @@ def _build_stage2_fallback_markdown(*, slide_no, code, message, raw_data_map, ta
     return markdown, validation
 
 
+def _blocks_without_duplicate_page_evidence(target_blocks, page_ref: str | None):
+    blocks = []
+    for block in target_blocks or []:
+        copied = dict(block)
+        if page_ref:
+            copied.pop("page_image_ref", None)
+            if copied.get("crop_ref_is_page") or copied.get("crop_ref") == page_ref:
+                copied.pop("crop_ref", None)
+                copied.pop("crop_ref_is_page", None)
+            for key in ("image_ref", "image_path", "path", "table_image_path", "formula_image_path"):
+                if copied.get(key) == page_ref:
+                    copied.pop(key, None)
+        blocks.append(copied)
+    return blocks
+
+
+def _first_page_image_ref(target_blocks) -> str | None:
+    for block in target_blocks or []:
+        for key in ("page_image_ref", "crop_ref", "image_ref", "image_path", "path"):
+            value = str(block.get(key) or "").strip()
+            if value:
+                return value
+    return None
+
+
+def _copy_page_evidence(page_ref: str, ppt_root: Path, slide_no: int) -> str | None:
+    source = Path(page_ref)
+    if not source.exists() or not source.is_file():
+        return None
+    evidence_dir = ppt_root / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix or ".png"
+    dest = evidence_dir / f"Slide_{slide_no:02d}{suffix}"
+    if not dest.exists():
+        shutil.copy2(source, dest)
+    return f"evidence/{dest.name}"
+
+
+def _page_evidence_markdown(ref: str | None) -> str:
+    if not ref:
+        return ""
+    return f"![page evidence]({ref})"
+
+
 def _strip_slide_heading(markdown: str, slide_no: int) -> str:
     lines = (markdown or "").splitlines()
     if lines and lines[0].strip().lower() == f"# slide {slide_no}".lower():
         return "\n".join(lines[1:]).strip() + "\n"
     return (markdown or "").strip() + "\n"
-
-
-def _one_line_error(code: str, message: str) -> str:
-    text = " ".join(str(message or "").split())
-    if len(text) > 180:
-        text = text[:177].rstrip() + "..."
-    return f"{code}: {text}" if text else str(code)
 
 
 def _stage2_warning_fallback_issue(validation: dict, *, slide_no, raw_data_map, target_blocks) -> dict | None:

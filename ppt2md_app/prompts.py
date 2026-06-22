@@ -1,5 +1,5 @@
 PROMPT_STAGE_1_VERSION = "stage1-handwritten-quality-formula-table-2026-06-22"
-PROMPT_STAGE_2_VERSION = "stage2-brain-formula-table-2026-06-22"
+PROMPT_STAGE_2_VERSION = "stage2-clean-markdown-no-diagnostics-2026-06-22"
 
 
 PROMPT_STAGE_1_VISION = r"""
@@ -125,6 +125,7 @@ PROMPT_STAGE_2_BRAIN = r"""
 
 【输出要求】
 只输出当前页的 Markdown。不要输出“好的”“以下是”“作为编辑”“根据五页 Raw Data”等任何开场白或结尾说明。
+最终 Markdown 是给用户阅读的正文，不是审计报告。不要输出错误原因、覆盖率、识别质量警告、处理过程、模型思考过程、重组失败说明、fallback 说明、validator 结论或任何调试信息。
 
 结构如下：
 
@@ -137,15 +138,11 @@ PROMPT_STAGE_2_BRAIN = r"""
      > [!NOTE] 图示说明
      > (在此处放入整理后的图像几何描述，方便后续 TikZ 绘图)
 
-2. **原文勘误** (可选)：
-   - 只有在 [Target] 内部存在明显 OCR 错误，且需要说明时才输出。
-   - 勘误只解释当前页内部修正，不要写“根据 P-1/N+1 补全了...”。
-   > [!WARNING] 原文勘误
-   > ...
-
 禁止输出：
 - 任何 `<CTX>` 元数据。
 - 任何前后页 Raw Data 的正文。
-- 任何“符号统一说明”“处理依据”类型的编辑日志，除非它是当前页 OCR 勘误且非常必要。
+- 任何“符号统一说明”“处理依据”“原文勘误”“识别不确定”“质量警告”“错误原因”“覆盖率偏低”类型的编辑日志。
+- 任何 `> [!WARNING]` 诊断块。
+- 任何“注：手写看似...”“根据数学逻辑...”“根据上下文推测...”这类模型自行解释或纠错过程。
 - 任何 Markdown 代码围栏包裹全文。
 """

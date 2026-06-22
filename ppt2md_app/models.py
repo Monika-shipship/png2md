@@ -536,7 +536,15 @@ def sanitize_stage_2_markdown(markdown: str, slide_no: int) -> str:
         if not text.startswith("#"):
             text = f"# Slide {slide_no}\n\n{text}".strip()
 
+    text = _remove_user_invisible_diagnostics(text).strip()
     return text.rstrip() + "\n"
+
+
+def sanitize_user_invisible_diagnostics(markdown: str) -> str:
+    """Remove diagnostics from already assembled Markdown without changing structure."""
+    if not markdown:
+        return markdown
+    return _remove_user_invisible_diagnostics(markdown).rstrip() + "\n"
 
 
 def _is_stage_2_chatter_line(line: str) -> bool:
@@ -556,6 +564,84 @@ def _is_stage_2_chatter_line(line: str) -> bool:
         "已根据",
     )
     return normalized.startswith(chatter_prefixes)
+
+
+def _remove_user_invisible_diagnostics(markdown: str) -> str:
+    lines = (markdown or "").splitlines()
+    cleaned = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if _is_diagnostic_admonition_start(stripped):
+            index += 1
+            while index < len(lines):
+                candidate = lines[index]
+                if not candidate.strip():
+                    index += 1
+                    break
+                if candidate.lstrip().startswith(">"):
+                    index += 1
+                    continue
+                break
+            continue
+        if _is_standalone_diagnostic_line(stripped):
+            index += 1
+            continue
+        cleaned.append(line)
+        index += 1
+    return _strip_inline_diagnostic_parentheticals("\n".join(cleaned))
+
+
+def _is_diagnostic_admonition_start(stripped: str) -> bool:
+    if not stripped.startswith(">"):
+        return False
+    normalized = stripped.lstrip("> ").strip()
+    return bool(
+        re.match(r"\[!WARNING\]\s*(原文勘误|识别不确定|公式识别不确定|表格识别不确定|图示识别不确定|Stage\s*2\s*重组失败|质量警告)", normalized, flags=re.IGNORECASE)
+    )
+
+
+def _is_standalone_diagnostic_line(stripped: str) -> bool:
+    if not stripped:
+        return False
+    normalized = stripped.lstrip("> ").strip()
+    diagnostic_prefixes = (
+        "注：手写看似",
+        "注: 手写看似",
+        "根据数学逻辑",
+        "根据上下文逻辑",
+        "根据上下文推测",
+        "质量警告：",
+        "原始识别：",
+        "原始识别已按纯文本保留",
+        "Stage 2 重组失败",
+        "原因：",
+    )
+    return normalized.startswith(diagnostic_prefixes)
+
+
+def _strip_inline_diagnostic_parentheticals(text: str) -> str:
+    diagnostic_terms = (
+        "手写看似",
+        "根据数学逻辑",
+        "根据上下文逻辑",
+        "根据上下文推测",
+        "模型",
+        "OCR",
+        "识别",
+        "推测",
+        "应理解",
+    )
+
+    def keep_or_drop(match):
+        body = match.group(1)
+        if body.startswith(("注：", "注:")) and any(term in body for term in diagnostic_terms):
+            return ""
+        return match.group(0)
+
+    text = re.sub(r"（([^（）]{0,220})）", keep_or_drop, text)
+    return re.sub(r"\(([^()]{0,220})\)", keep_or_drop, text)
 
 
 def _run_dashscope_brain(filled_prompt, config: AppConfig):
