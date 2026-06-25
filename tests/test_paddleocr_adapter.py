@@ -64,3 +64,16 @@ def test_paddleocr_adapter_markdown_fallback_uses_numeric_confidence(tmp_path):
     assert block["type"] == "paragraph"
     assert block["confidence"] == 0.62
     assert block["confidence_label"] == "medium"
+
+
+def test_paddleocr_adapter_skips_bad_jsonl_and_keeps_empty_page(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    payload = {"layoutParsingResults": [{"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "", "images": {}}}]}
+    (artifact / "result.jsonl").write_text("not-json\n" + json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    document_ir = adapt_paddleocr_artifacts(discover_paddleocr_artifacts(artifact), source_path="blank.pdf")
+
+    assert len(document_ir["pages"]) == 1
+    assert document_ir["pages"][0]["blocks"] == []
+    assert document_ir["pages"][0]["raw_text"] == ""

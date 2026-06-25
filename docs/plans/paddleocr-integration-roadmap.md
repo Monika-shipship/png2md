@@ -23,13 +23,15 @@ PaddleOCR 已作为 DocPage2MD 的正式可选解析引擎接入。它和 MinerU
 - PaddleOCR DocumentIR 复用现有 renderer、validator、formula/table/figure 检查和 hybrid enrichment。
 - GUI 工作流已改为“解析引擎 + Markdown 精修”，PaddleOCR 作为可选解析引擎。
 - GUI Provider/Key 页已包含 PaddleOCR，进度条可读取 `extractProgress.totalPages/extractedPages`。
-- 离线测试覆盖 adapter、client fake HTTP、pipeline 渲染、chunk merge。
+- PaddleOCR API client 对提交、轮询和结果下载的 `429/503/504` 与网络错误按配置重试。
+- 远程 URL 输入在可读取 `Content-Length` 时会阻止超过 200MB 的文件；未知大小会记录日志并继续提交。
+- 离线测试覆盖 adapter、坏 JSONL、空页、client fake HTTP、pending/running/done、429/503/504 重试、结果下载重试、pipeline 渲染和 chunk merge。
 
 仍需真实验收/优化：
 
-- 使用 ignored `tests/test-PaddleOCR/` 和真实 `PADDLEOCR_API_TOKEN` 跑 `paddleocr_only` 与 `paddleocr_hybrid` 全量样本。
+- 通过 GUI 跑 ignored `tests/test-PaddleOCR/` 中样本的 `paddleocr_only` 与 `paddleocr_hybrid` 全量验收，并记录 GUI 进度/日志表现。
 - 与同一文件的 `mineru_only` / `mineru_hybrid` 对比速度、公式质量、表格质量和图片切分质量。
-- 根据真实失败码补充更细的错误提示和重试策略。
+- 根据更多真实失败码继续补充更细的错误提示。
 - 根据真实返回字段继续完善 PaddleOCR artifact 解析。
 
 ## 已阅读的本地文档

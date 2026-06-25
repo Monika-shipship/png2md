@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -25,6 +26,7 @@ PADDLEOCR_SUPPORTED_MODELS = (
     "PP-StructureV3",
     "PP-OCRv5",
 )
+PADDLEOCR_RETRY_HTTP_STATUS = {429, 503, 504}
 
 
 class PaddleOCRError(RuntimeError):
@@ -216,7 +218,7 @@ class PaddleOCRClient:
 
     def _download_bytes(self, url: str) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": "DocPage2MD-PaddleOCR/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with self._open_with_retry(req, timeout=60) as response:
             return response.read()
 
     def _request_json(self, url: str, *, data: dict[str, Any] | None = None, method: str = "GET") -> dict[str, Any]:
@@ -242,8 +244,9 @@ class PaddleOCRClient:
         return self._send_json_request(req)
 
     def _send_json_request(self, req: urllib.request.Request) -> dict[str, Any]:
+        raw = ""
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
+            with self._open_with_retry(req, timeout=60) as response:
                 raw = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -258,6 +261,33 @@ class PaddleOCRClient:
         if code not in (0, "0", None):
             raise PaddleOCRError(f"PaddleOCR API 错误 {code}: {_safe_error_text(payload.get('msg') or payload.get('errorMsg') or payload)}")
         return payload
+
+    def _open_with_retry(self, req: urllib.request.Request, *, timeout: int):
+        max_retries = max(0, int(self.config.api_max_retries or 0))
+        base_sleep = max(0.0, float(self.config.api_retry_base_sleep or 0.0))
+        max_sleep = max(0.0, float(self.config.api_retry_max_sleep or 0.0))
+        attempt = 0
+        while True:
+            try:
+                return urllib.request.urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                if exc.code not in PADDLEOCR_RETRY_HTTP_STATUS or attempt >= max_retries:
+                    raise
+                safe_progress(
+                    self.progress,
+                    f"PaddleOCR request retry: status={exc.code}, attempt={attempt + 1}/{max_retries}, url={_safe_url_label(req.full_url)}",
+                )
+                _sleep_for_retry(attempt, base_sleep, max_sleep)
+                attempt += 1
+            except urllib.error.URLError:
+                if attempt >= max_retries:
+                    raise
+                safe_progress(
+                    self.progress,
+                    f"PaddleOCR request retry: status=network, attempt={attempt + 1}/{max_retries}, url={_safe_url_label(req.full_url)}",
+                )
+                _sleep_for_retry(attempt, base_sleep, max_sleep)
+                attempt += 1
 
 
 def build_optional_payload(config: AppConfig) -> dict[str, Any]:
@@ -345,3 +375,13 @@ def _safe_error_text(value: Any) -> str:
 def _safe_url_label(url: str) -> str:
     parsed = urllib.parse.urlsplit(str(url))
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _sleep_for_retry(attempt: int, base_sleep: float, max_sleep: float) -> None:
+    if base_sleep <= 0:
+        return
+    delay = base_sleep * (2 ** attempt)
+    if max_sleep > 0:
+        delay = min(delay, max_sleep)
+    delay *= 1.0 + random.random() * 0.1
+    time.sleep(delay)

@@ -58,25 +58,48 @@ def refresh_official_catalog(
     records: list[ModelRecord] = []
     errors: list[dict[str, str]] = []
     normalized = [provider.strip().lower() for provider in providers if provider.strip()]
+    provider_status: dict[str, dict[str, Any]] = {
+        provider: {"status": "pending", "records": 0, "source_urls": _source_urls_for([provider]), "error": None}
+        for provider in normalized
+    }
 
     if "dashscope" in normalized:
         try:
+            before = len(records)
             records.extend(fetch_model_ids_from_docs())
+            provider_status["dashscope"]["status"] = "ok"
+            provider_status["dashscope"]["records"] = len(records) - before
         except Exception as exc:
-            errors.append({"provider": "dashscope", "stage": "fetch", "error": str(exc)[:500]})
+            error = {"provider": "dashscope", "stage": "fetch", "error": str(exc)[:500]}
+            errors.append(error)
+            provider_status["dashscope"]["status"] = "failed"
+            provider_status["dashscope"]["error"] = error["error"]
 
     if "deepseek" in normalized:
         try:
+            before = len(records)
             records.extend(fetch_deepseek_official_records())
+            provider_status["deepseek"]["status"] = "ok"
+            provider_status["deepseek"]["records"] = len(records) - before
         except Exception as exc:
-            errors.append({"provider": "deepseek", "stage": "fetch", "error": str(exc)[:500]})
+            error = {"provider": "deepseek", "stage": "fetch", "error": str(exc)[:500]}
+            errors.append(error)
+            provider_status["deepseek"]["status"] = "failed"
+            provider_status["deepseek"]["error"] = error["error"]
 
     if "openai-compatible" in normalized or "openai_compatible" in normalized:
+        provider_key = "openai-compatible" if "openai-compatible" in normalized else "openai_compatible"
         try:
             discovered = fetch_openai_compatible_models(openai_base_url or base_url, api_key_env=openai_api_key_env)
             records.extend(discovered)
+            provider_status[provider_key]["status"] = "ok"
+            provider_status[provider_key]["records"] = len(discovered)
+            provider_status[provider_key]["source_urls"] = [f"{(openai_base_url or base_url).rstrip('/')}/models"]
         except Exception as exc:
-            errors.append({"provider": "openai_compatible", "stage": "fetch", "error": str(exc)[:500]})
+            error = {"provider": "openai_compatible", "stage": "fetch", "error": str(exc)[:500]}
+            errors.append(error)
+            provider_status[provider_key]["status"] = "failed"
+            provider_status[provider_key]["error"] = error["error"]
 
     if import_pricing_md:
         try:
@@ -92,6 +115,7 @@ def refresh_official_catalog(
     cache_data["providers"] = normalized
     cache_data["refresh"] = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "provider_status": provider_status,
         "errors": errors,
         "diff": diff,
         "price_refresh": True,

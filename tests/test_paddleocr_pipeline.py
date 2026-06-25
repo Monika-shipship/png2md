@@ -90,6 +90,10 @@ def test_paddleocr_chunk_merge_renumbers_outputs(tmp_path):
     assert (output_dir / "Slide_101.md").exists()
     assert "assets/chunk_002/fig.png" in (output_dir / "Slide_101.md").read_text(encoding="utf-8")
     assert (output_dir / "paddleocr_raw" / "chunk_002" / "result.jsonl").exists()
+    report = json.loads((output_dir / "run_report.json").read_text(encoding="utf-8"))
+    assert report["doc_name"] == "Deck"
+    assert report["paddleocr"]["chunked_merge"]["copied_slides"] == [101]
+    assert report["pages"][0]["slide_no"] == 101
 
 
 def test_paddleocr_251_pages_split_to_three_chunks():

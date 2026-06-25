@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 import urllib.parse
+import urllib.request
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from multiprocessing import Manager
@@ -16,6 +17,7 @@ from .input_inspection import (
     MINERU_SINGLE_REQUEST_PAGE_LIMIT,
     PADDLEOCR_LOCAL_FILE_LIMIT_BYTES,
     PADDLEOCR_RECOMMENDED_CHUNK_PAGES,
+    PADDLEOCR_URL_FILE_LIMIT_BYTES,
     build_page_chunks,
     estimate_pdf_pages,
     validate_mineru_model_version_for_paths,
@@ -922,6 +924,7 @@ def _run_paddleocr_cli(args, config: AppConfig) -> int:
     try:
         client = PaddleOCRClient(config, progress=run_logger)
         if args.paddleocr_url:
+            _validate_paddleocr_url_size(args.paddleocr_url, progress=run_logger)
             safe_progress(run_logger, f"Submitting remote URL to PaddleOCR: {_safe_source_label(args.paddleocr_url)}")
             job_id = client.submit_url(args.paddleocr_url, page_ranges=args.page_ranges)
             safe_progress(run_logger, f"PaddleOCR task submitted: job_id={job_id}")
@@ -1647,6 +1650,27 @@ def _validate_paddleocr_size(path: Path) -> None:
     if path.exists() and path.stat().st_size > PADDLEOCR_LOCAL_FILE_LIMIT_BYTES:
         size_mb = path.stat().st_size / (1024 * 1024)
         raise ValueError(f"PaddleOCR 本地上传单文件限制为 50MB：{path.name} 当前约 {size_mb:.1f}MB。")
+
+
+def _validate_paddleocr_url_size(url: str, *, progress=None) -> None:
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "DocPage2MD-PaddleOCR/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            length_text = response.headers.get("Content-Length")
+    except Exception as exc:
+        safe_progress(progress, f"PaddleOCR URL size check skipped: source={_safe_source_label(url)}, error={exc}")
+        return
+    if not length_text:
+        safe_progress(progress, f"PaddleOCR URL size unknown: source={_safe_source_label(url)}")
+        return
+    try:
+        size = int(length_text)
+    except ValueError:
+        safe_progress(progress, f"PaddleOCR URL size unknown: source={_safe_source_label(url)}")
+        return
+    if size > PADDLEOCR_URL_FILE_LIMIT_BYTES:
+        size_mb = size / (1024 * 1024)
+        raise ValueError(f"PaddleOCR URL 文件限制为 200MB：{_safe_source_label(url)} 当前约 {size_mb:.1f}MB。")
 
 
 def _match_batch_results_to_sources(results, source_files: list[Path]) -> list[Path]:

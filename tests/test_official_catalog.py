@@ -81,7 +81,34 @@ def test_refresh_official_catalog_falls_back_to_static_on_provider_failure(monke
     assert result.errors[0]["provider"] == "deepseek"
     assert result.records
     assert result.cache_data["schema_version"] == 2
+    assert result.cache_data["refresh"]["provider_status"]["deepseek"]["status"] == "failed"
+    assert result.cache_data["refresh"]["provider_status"]["deepseek"]["error"] == "boom"
     assert (tmp_path / "models.json").exists()
+
+
+def test_refresh_official_catalog_records_provider_status_and_openai_prices_are_manual(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    monkeypatch.setattr("docpage2md_app.official_catalog.fetch_model_ids_from_docs", lambda: [])
+
+    def fake_urlopen(req, timeout=10):
+        assert req.full_url == "https://provider.test/v1/models"
+        return _Response({"data": [{"id": "custom-model"}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = refresh_official_catalog(
+        providers=["dashscope", "openai-compatible"],
+        cache_path=str(tmp_path / "models.json"),
+        base_url="https://provider.test/v1",
+    )
+
+    status = result.cache_data["refresh"]["provider_status"]
+    assert status["dashscope"]["status"] == "ok"
+    assert status["openai-compatible"]["status"] == "ok"
+    custom = [record for record in result.records if record.model_id == "custom-model"][0]
+    assert custom.price_source == "user_required"
+    assert custom.input_price is None
+    assert custom.output_price is None
 
 
 class _Response:

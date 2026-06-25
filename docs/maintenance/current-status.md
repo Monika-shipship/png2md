@@ -143,13 +143,15 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
-- `python -m pytest -q`: 279 passed.
+- `python -m pytest -q`: 283 passed.
 - `git diff --check`: passed, with only CRLF conversion warnings.
 - GUI construction smoke passed: `DocPage2MdGui()` can construct, update idle tasks and destroy cleanly after the input table/provider/cost redesign.
 - `python -m pytest tests/test_cli.py tests/test_gui.py tests/test_hybrid_enrichment.py tests/test_mineru_pipeline.py tests/test_files_and_session.py tests/test_run_logger.py -q`: 41 passed during GUI/log/performance work.
-- `python -m pytest tests/test_gui.py tests/test_paddleocr_adapter.py tests/test_paddleocr_client.py tests/test_paddleocr_pipeline.py tests/test_official_catalog.py -q`: 45 passed during PaddleOCR/model refresh work.
-- PaddleOCR offline tests cover adapter, client fake HTTP, pipeline rendering and chunk merge.
+- `python -m pytest tests/test_paddleocr_client.py tests/test_paddleocr_adapter.py tests/test_paddleocr_pipeline.py tests/test_official_catalog.py tests/test_cli.py -q`: 30 passed during PaddleOCR hardening work.
+- PaddleOCR offline tests cover adapter, bad JSONL/empty pages, client fake HTTP, pending/running/done states, 429/503/504 retry, result download retry, pipeline rendering and chunk merge.
 - PaddleOCR adapter confidence values are numeric floats in `0.0-1.0`; human confidence labels are stored separately as `confidence_label`. This is required because the hybrid refiner treats `block.confidence` as numeric.
+- PaddleOCR remote URL inputs perform a HEAD `Content-Length` check when available and block files over 200 MB; unknown length is logged and allowed to proceed.
+- Official catalog refresh cache includes `refresh.provider_status` with per-provider status, source URLs, record counts and failure reasons.
 - Historical alias search: no working-tree matches.
 - Public fixture artifact smoke can run without network or private data.
 - Private real API smoke should use ignored files under `input_docs/` or another local path; do not commit those inputs or outputs.

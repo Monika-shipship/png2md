@@ -64,6 +64,12 @@
 - 修复 PaddleOCR `paddleocr_hybrid` 的置信度兼容问题：
   - PaddleOCR adapter 现在把 `block.confidence` 写为 `0.0-1.0` 浮点数。
   - `high/medium/low` 人类可读标签保存在 `confidence_label`，避免精修器把字符串转成 float 时失败。
+- 加强 PaddleOCR API 稳定性和限额提示：
+  - 提交、轮询和结果下载在 `429/503/504` 或网络错误时按配置重试。
+  - 远程 URL 输入会尽量用 HEAD 检查 `Content-Length`，可判定超过 200MB 时提前阻止。
+- 官方模型/价格缓存新增 provider 级刷新状态：
+  - `refresh.provider_status` 记录每个 Provider 的状态、来源 URL、模型数量和失败原因。
+  - OpenAI-compatible 继续只发现 `/models`，价格保持 `user_required`，不自动猜测。
 - 继续加强最终 Markdown 的数学符号规范化：
   - 单个裸 Unicode 数学符号会包成 LaTeX inline math。
   - `G→S`、`k→g→?` 这类箭头表达式会作为完整公式片段处理，避免生成重叠 `$...$`。
@@ -73,11 +79,12 @@
 
 - `python docpage2md.py --help`：通过。
 - `python -m docpage2md_app --help`：通过。
-- `python -m pytest -q`：279 passed。
+- `python -m pytest -q`：283 passed。
 - `git diff --check`：无 whitespace error，仅有 CRLF 提示。
 - Tkinter GUI 构建 smoke 通过：`DocPage2MdGui()` 能创建、刷新 idle tasks 并销毁。
 - 聚焦 GUI/CLI/MinerU/secrets 测试：54 passed。
 - 聚焦 PaddleOCR/official catalog 测试：45 passed。
+- 聚焦 PaddleOCR hardening 测试：30 passed，覆盖坏 JSONL/空页、`429/503/504` 重试、下载重试、URL 200MB 限制和 provider 状态缓存。
 - 使用真实 `tests/群论笔记4.1.pdf` 对当前版本做全量 hybrid 验证：
   - 输出目录：`markdown_output/git_verify_20260625_final2/git_verify_4_1_final2`。
   - 11 页全量，`hybrid + balanced`，Vision `qwen3-vl-plus`，Brain `deepseek-v4-flash`。

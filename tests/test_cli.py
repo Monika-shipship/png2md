@@ -324,6 +324,27 @@ def test_cli_missing_paddleocr_artifact_returns_clean_error(tmp_path, capsys):
     assert "Traceback" not in captured.err
 
 
+def test_cli_blocks_oversized_paddleocr_url(monkeypatch):
+    class _HeadResponse:
+        headers = {"Content-Length": str(201 * 1024 * 1024)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda _req, timeout=15: _HeadResponse())
+
+    try:
+        cli._validate_paddleocr_url_size("https://example.com/large.pdf")
+    except ValueError as exc:
+        assert "200MB" in str(exc)
+        assert "large.pdf" in str(exc)
+    else:
+        raise AssertionError("Expected oversized PaddleOCR URL to fail")
+
+
 def test_interactive_default_starts_with_hybrid_mineru_pdf(monkeypatch):
     args = cli.parse_args([])
     responses = iter(["", "", "", "", "notes.pdf", "1-5"])
