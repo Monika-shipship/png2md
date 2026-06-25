@@ -28,7 +28,8 @@ PaddleOCR 已作为 DocPage2MD 的正式可选解析引擎接入。它和 MinerU
 - 离线测试覆盖 adapter、坏 JSONL、空页、client fake HTTP、pending/running/done、429/503/504 重试、结果下载重试、pipeline 渲染和 chunk merge。
 - 已通过 Tkinter GUI 代码路径用 `tests/群论笔记4.1.pdf` 全量跑通 `paddleocr_only` 和 `paddleocr_hybrid`，输出分别在 `markdown_output/gui_paddleocr_real_verify_only/gui_paddleocr_4_1_only` 与 `markdown_output/gui_paddleocr_real_verify_hybrid/gui_paddleocr_4_1_hybrid`。
 - 同一 PDF 的基础耗时对比已记录：`mineru_only` 约 `16.4s`，`mineru_hybrid` 约 `113.9s`，`paddleocr_only` 约 `19.1s`，`paddleocr_hybrid` 约 `106.0s`。
-- `dual_hybrid` 双引擎融合首版已完成：MinerU 作为主版面/crop 骨架，PaddleOCR 作为同页证据，再进入 DocPage2MD 精修。
+- `dual_hybrid` 双引擎融合已升级为候选组融合：同页 MinerU/PaddleOCR block 先按 bbox、文本相似度、垂直位置、类型和图注/图片邻近关系粗分组，再通过白名单操作生成 `fused_document_ir.json`，最后进入 DocPage2MD 精修。
+- 双引擎输出会保留 `ir/mineru_document_ir.json`、`ir/paddleocr_document_ir.json`、`ir/fused_document_ir.json` 和兼容 `ir/document_ir.json`；`run_report.json["fusion"]` 记录候选组、融合决策、被拒绝操作和不确定项。
 - 已用真实 `tests/群论笔记4.1.pdf` 页 1 验证 PaddleOCR API 和 `dual_hybrid`，输出分别在 `markdown_output/paddleocr_api_probe_20260625/paddleocr_api_probe_page1`、`markdown_output/dual_real_probe_20260625/dual_real_probe_page1` 和修复后复跑的 `markdown_output/dual_real_artifact_rerun_20260625/dual_real_artifact_rerun_page1`。
 
 仍需真实验收/优化：
@@ -211,11 +212,11 @@ MinerU + PaddleOCR 双引擎融合精修
 - Brain prompt 接收 compact dual evidence，只允许 checked ops 局部修正。
 - 输出保留 `mineru_raw/`、`paddleocr_raw/`、融合后的 `ir/document_ir.json` 和 `run_report.json`。
 
-首版限制：
+当前限制：
 
 - 远程 URL 暂不直接支持双引擎，可先分别生成 artifact 后融合。
 - 长 PDF 暂不做双引擎自动分段合并；超过 PaddleOCR chunk size 时阻止运行。
-- 当前是 MinerU-primary evidence merge，不是完整 bbox candidate grouping。下面的 candidate grouping 仍是下一步质量升级方向。
+- 融合决策默认是离线保守策略；AI 结构化裁决的 prompt 和白名单边界已准备好，但真实 Brain 裁决还需要更多质量回归后再打开。
 
 ### 核心原则
 
@@ -523,9 +524,10 @@ HTTP 假服务测试：
 
 ### Phase 6：双引擎融合升级
 
-- 实现 `dual_hybrid` 自动 chunked merge。
-- 实现 bbox/text candidate grouping，而不是只把 PaddleOCR 作为整页证据。
-- 记录每个候选组的 choose/merge/keep-both/mark-uncertain 审计。
+- 已实现 bbox/text/type candidate grouping，而不是只把 PaddleOCR 作为整页证据。
+- 已记录每个候选组的 choose/merge/keep-both/mark-uncertain 审计。
+- 待实现 `dual_hybrid` 自动 chunked merge。
+- 待在更多真实样本上评估是否启用 Brain 结构化融合裁决。
 - 用真实长 PDF 和复杂公式页比较 `mineru_hybrid`、`paddleocr_hybrid`、`dual_hybrid` 的质量和耗时。
 
 ## 不做的事

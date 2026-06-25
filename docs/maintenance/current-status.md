@@ -25,7 +25,7 @@ DocPage2MD has five processing modes:
 - `mineru_hybrid` / `hybrid`: MinerU layout/crops first, then crop vision + Brain JSON ops + checked refiner + deterministic renderer.
 - `paddleocr_only`: call or read PaddleOCR output, adapt `layoutParsingResults` / Markdown / images to DocumentIR, then render clean Markdown.
 - `paddleocr_hybrid`: PaddleOCR DocumentIR plus DocPage2MD crop Vision / Brain refinement.
-- `dual_hybrid`: MinerU and PaddleOCR both parse the same input; MinerU stays the primary layout/crop backbone, PaddleOCR is same-page evidence, then DocPage2MD runs crop Vision + Brain + checked refiner.
+- `dual_hybrid`: MinerU and PaddleOCR both parse the same input; a fusion layer aligns pages, builds bbox/text/type candidate groups, applies checked whitelist fusion ops into `fused_document_ir.json`, then DocPage2MD runs crop Vision + Brain + checked refiner on the fused IR.
 - `vision_only`: legacy image-folder flow for page images.
 
 The Tkinter GUI is the current lightweight desktop entry. It supports local single file, multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL inputs; Chinese labels/logs; progress/ETA; cost estimate; output folder opening; Vision/Brain worker controls; and model management. The run tab is split into left-side workflow/input/output controls and right-side progress/cost/log controls.
@@ -40,7 +40,7 @@ Current GUI details:
 - Cost UI is a table and only estimates Vision/Brain token fees; MinerU/PaddleOCR are quota/limit notes.
 - Model management is provider-first: Provider/Key, role binding, candidate models and third-party model library.
 - PaddleOCR is selectable as a parser engine, default model `PaddleOCR-VL-1.6`, async endpoint `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`, default PDF chunk size 100 pages.
-- Dual parser is selectable as `MinerU + PaddleOCR 双引擎融合`; it currently supports local files/folders and artifact pairs, not remote URLs or automatic chunked dual merge.
+- Dual parser is selectable as `MinerU + PaddleOCR 双引擎融合`; it currently supports local files/folders and artifact pairs, not remote URLs or automatic chunked dual merge. It writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json`.
 - Official model/price refresh is available through CLI and GUI background refresh, with provider-aware diff summary and local fallback. DashScope refresh keeps the broad official catalog but filters obvious documentation slug artifacts; GUI role binding then narrows Vision/Brain candidates by capability metadata.
 
 The longer-term WebUI plan is tracked in `docs/plans/webui-roadmap.md`. PaddleOCR status and follow-up comparison work are tracked in `docs/plans/paddleocr-integration-roadmap.md`.
@@ -181,10 +181,16 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
   - PaddleOCR-only API probe output: `markdown_output/paddleocr_api_probe_20260625/paddleocr_api_probe_page1`.
     - `status=ok`, `engine_mode=paddleocr_only`, 1 page, and real API result contained `layoutParsingResults`, `prunedResult`, `markdown`, `outputImages`, `inputImage` and `dataInfo`.
   - Dual real probe output: `markdown_output/dual_real_probe_20260625/dual_real_probe_page1`.
-    - `status=ok`, `engine_mode=dual_hybrid`, strategy `mineru_primary_paddleocr_evidence`, layout model `vlm+PaddleOCR-VL-1.6`.
+    - `status=ok`, `engine_mode=dual_hybrid`, old strategy `mineru_primary_paddleocr_evidence`, layout model `vlm+PaddleOCR-VL-1.6`.
   - Post-fix artifact rerun output: `markdown_output/dual_real_artifact_rerun_20260625/dual_real_artifact_rerun_page1`.
     - `status=ok`, pages `1/1`, Vision `qwen3-vl-plus`, Brain `deepseek-v4-flash`.
     - Final Markdown no longer repeats `(2)结合律：` and passed no-key/no-traceback/no-provider-error/no-validator-text/no-reasoning checks.
+- Latest dual fusion offline upgrade:
+  - New files: `docpage2md_app/fusion.py`, `docpage2md_app/fusion_prompt.py`, `tests/test_fusion.py`.
+  - Strategy: `candidate_group_checked_ops`.
+  - Candidate grouping uses bbox overlap, text similarity, vertical/type similarity and caption/image proximity; unmatched MinerU/PaddleOCR blocks are preserved.
+  - Fusion report records candidate groups, decisions, rejected ops and uncertain items under `run_report.json["fusion"]`.
+  - Tests cover page alignment, unmatched preservation, formula replacement, bad op rejection, prompt public fields and pipeline IR emission.
 - Same-file parser comparison for `tests/群论笔记4.1.pdf`:
   - `mineru_only`: `markdown_output/mineru_real_compare_4_1_only/mineru_4_1_only_compare`, 11 pages, `status=ok`, final pages `ok=11/11`, about `16.4s`.
   - `mineru_hybrid` / legacy `hybrid`: `markdown_output/gui_parallel_full_verify/群论笔记4.1`, 11 pages, `status=ok`, final pages `ok=11/11`, about `113.9s`.

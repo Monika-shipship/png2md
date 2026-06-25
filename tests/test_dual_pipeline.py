@@ -78,11 +78,16 @@ def test_dual_pipeline_renders_and_records_both_raw_dirs(tmp_path):
     assert (output / "paddleocr_raw" / "result.jsonl").exists()
     report = read_json(output / "run_report.json")
     assert report["engine_mode"] == "dual_hybrid"
-    assert report["dual_parser"]["strategy"] == "mineru_primary_paddleocr_evidence"
+    assert report["dual_parser"]["strategy"] == "candidate_group_checked_ops"
+    assert report["fusion"]["summary"]["candidate_groups"] >= 1
     assert report["hybrid_enrichment"]["enabled"] is True
     assert report["summary"]["markdown_source_counts"]["dual_hybrid_enriched_ir"] == 1
+    assert (output / "ir" / "mineru_document_ir.json").exists()
+    assert (output / "ir" / "paddleocr_document_ir.json").exists()
+    assert (output / "ir" / "fused_document_ir.json").exists()
     document_ir = read_json(output / "ir" / "document_ir.json")
     assert document_ir["pages"][0]["dual_evidence"]["paddleocr"]["block_count"] == 2
+    assert document_ir["pages"][0]["fusion"]["candidate_groups"]
 
 
 def test_dual_page_limit_uses_paddleocr_chunk_size():

@@ -125,14 +125,20 @@ def translate_progress_message(message: str) -> str:
         return f"MinerU 证据已就绪：页数={match.group(1)}，素材={match.group(2)}"
     if match := re.search(r"PaddleOCR evidence ready: pages=(\d+), assets=(\d+)", message):
         return f"PaddleOCR 证据已就绪：页数={match.group(1)}，素材={match.group(2)}"
+    if message == "Fusing MinerU + PaddleOCR candidate groups":
+        return "正在构建双引擎候选组并融合 MinerU/PaddleOCR 证据"
     if message == "Merging MinerU + PaddleOCR evidence":
         return "正在融合 MinerU 与 PaddleOCR 两份解析证据"
+    if match := re.search(r"Dual fused DocumentIR ready: pages=(\d+), blocks=(\d+), candidate_groups=(.+)", message):
+        return f"双引擎融合结构已就绪：页数={match.group(1)}，块数={match.group(2)}，候选组={match.group(3)}"
     if match := re.search(r"Dual DocumentIR ready: pages=(\d+), primary_blocks=(\d+)", message):
         return f"双引擎文档结构已就绪：共 {match.group(1)} 页，主块数={match.group(2)}"
     if message == "Dual hybrid enrichment start: crop vision + Brain evidence selection":
         return "开始双引擎混合精修：裁剪图 Vision 识别 + Brain 证据判断"
     if message.startswith("Dual hybrid enrichment done:"):
         return f"双引擎混合精修完成：{message.split(':', 1)[1].strip()}"
+    if match := re.search(r"Wrote dual fusion IR files: (.+)", message):
+        return f"双引擎融合 IR 已写入：{match.group(1)}"
     if match := re.search(r"Wrote dual document IR: (.+)", message):
         return f"双引擎内部文档结构已写入：{match.group(1)}"
     if match := re.search(r"Rendering dual page (\d+)/(\d+): slide=(\d+), blocks=(\d+)", message):

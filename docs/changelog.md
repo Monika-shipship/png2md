@@ -4,6 +4,12 @@
 
 ### Added
 
+- 升级 `dual_hybrid` 双引擎融合层：
+  - 新增 `docpage2md_app/fusion.py` 和 `docpage2md_app/fusion_prompt.py`。
+  - 同页 MinerU/PaddleOCR block 会先按 bbox 重叠、文本相似度、垂直位置、类型相似度和图注/图片邻近关系构建候选组。
+  - 程序只接受白名单融合操作：`choose_block`、`merge_blocks`、`keep_both`、`mark_uncertain`、`attach_image`、`replace_formula`、`convert_text_to_formula`、`convert_text_to_figure_note`。
+  - 双引擎输出新增 `ir/mineru_document_ir.json`、`ir/paddleocr_document_ir.json`、`ir/fused_document_ir.json`，并保留兼容 `ir/document_ir.json`。
+  - `run_report.json["fusion"]` 记录候选组、融合决策、被拒绝操作和不确定项。
 - 正式接入 PaddleOCR 主路径：
   - 新增 `paddleocr_only` 和 `paddleocr_hybrid`。
   - 新增 `--layout-engine mineru|paddleocr|dual|none` 和 `--refine-mode none|docpage2md`。
@@ -107,11 +113,14 @@
   - `paddleocr_hybrid` 输出目录：`markdown_output/gui_paddleocr_real_verify_hybrid/gui_paddleocr_4_1_hybrid`，11 页全量，`status=ok`，最终页 `ok=11/11`，Brain `partial=11/11`，约 `106.0s`。
   - 两个输出都包含 `paddleocr_raw/`、`ir/`、`assets/`、`Slide_XX.md`、`*_FULL.md`、`run_report.json` 和中文 `process.log`。
   - 最终用户 Markdown 未发现 API Key、Python traceback、validator 文本、模型思考过程或置信度转换错误。
-- 使用真实 `tests/群论笔记4.1.pdf` 验证 PaddleOCR API 与 `dual_hybrid`：
+- 使用真实 `tests/群论笔记4.1.pdf` 验证 PaddleOCR API 与早期 `dual_hybrid`：
   - PaddleOCR-only API 探针输出：`markdown_output/paddleocr_api_probe_20260625/paddleocr_api_probe_page1`，1 页，`status=ok`，确认真实返回包含 `layoutParsingResults/prunedResult/markdown/outputImages/inputImage/dataInfo`。
-  - 双引擎真实页 1 输出：`markdown_output/dual_real_probe_20260625/dual_real_probe_page1`，`status=ok`，`engine_mode=dual_hybrid`，`dual_parser.strategy=mineru_primary_paddleocr_evidence`。
+  - 双引擎真实页 1 输出：`markdown_output/dual_real_probe_20260625/dual_real_probe_page1`，`status=ok`，`engine_mode=dual_hybrid`，历史策略为 `mineru_primary_paddleocr_evidence`。
   - 修复重复标题后，用真实 artifact 复跑输出：`markdown_output/dual_real_artifact_rerun_20260625/dual_real_artifact_rerun_page1`，`status=ok`，1/1 页，layout model `vlm+PaddleOCR-VL-1.6`，Vision `qwen3-vl-plus`，Brain `deepseek-v4-flash`。
   - 最终用户 Markdown 未发现 API Key、Python traceback、provider 原始错误、validator 诊断文本或模型思考过程。
+- 双引擎候选组融合离线验证：
+  - `python -m pytest tests/test_fusion.py tests/test_dual_pipeline.py tests/test_hybrid_enrichment.py tests/test_mineru_pipeline.py tests/test_paddleocr_pipeline.py tests/test_validators.py -q`：46 passed。
+  - 覆盖页级对齐、bbox/text 粗分组、未匹配 block 保留、公式候选替换、坏操作拒绝、prompt 不暴露内部 block 对象和 pipeline 写出 `fused_document_ir.json`。
 - 同一 PDF 主路径耗时对比已记录：
   - `mineru_only`：约 `16.4s`。
   - `mineru_hybrid` / `hybrid`：约 `113.9s`。

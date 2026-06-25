@@ -8,8 +8,9 @@ from typing import Any
 from .artifacts import RUN_REPORT_SCHEMA_VERSION, now_iso, sha256_text
 from .config import AppConfig
 from .content_inventory import build_content_inventory
-from .dual_ir import DUAL_ADAPTER_VERSION, merge_mineru_paddleocr_ir
+from .dual_ir import DUAL_ADAPTER_VERSION
 from .files import merge_markdowns, write_json, write_text_atomic
+from .fusion import fuse_document_irs
 from .hybrid_enrichment import HYBRID_ENRICHMENT_VERSION, enrich_mineru_document_ir
 from .mineru_adapter import adapt_mineru_artifacts
 from .mineru_artifacts import discover_mineru_artifacts
@@ -65,11 +66,25 @@ def process_dual_artifact_task(
     _copy_paddleocr_raw(paddleocr_artifacts, output_root)
     safe_progress(progress, f"PaddleOCR evidence ready: pages={len(paddleocr_ir.get('pages') or [])}, assets={len(paddle_ref_map)}")
 
-    safe_progress(progress, "Merging MinerU + PaddleOCR evidence")
-    document_ir = merge_mineru_paddleocr_ir(mineru_ir, paddleocr_ir, engine_mode=DUAL_ENGINE_MODE)
+    safe_progress(progress, "Fusing MinerU + PaddleOCR candidate groups")
+    fusion_result = fuse_document_irs(
+        mineru_ir,
+        paddleocr_ir,
+        document_type=config.document_type,
+        engine_mode=DUAL_ENGINE_MODE,
+    )
+    fusion_report = fusion_result.report
+    document_ir = fusion_result.document_ir
     pages = document_ir.get("pages") or []
     block_count = sum(len(page.get("blocks") or []) for page in pages)
-    safe_progress(progress, f"Dual DocumentIR ready: pages={len(pages)}, primary_blocks={block_count}")
+    safe_progress(
+        progress,
+        (
+            "Dual fused DocumentIR ready: "
+            f"pages={len(pages)}, blocks={block_count}, "
+            f"candidate_groups={(fusion_report.get('summary') or {}).get('candidate_groups')}"
+        ),
+    )
 
     safe_progress(progress, "Dual hybrid enrichment start: crop vision + Brain evidence selection")
     enrichment = enrich_mineru_document_ir(
@@ -85,10 +100,15 @@ def process_dual_artifact_task(
 
     ir_dir = output_root / "ir"
     ir_dir.mkdir(parents=True, exist_ok=True)
+    write_json(ir_dir / "mineru_document_ir.json", mineru_ir)
+    write_json(ir_dir / "paddleocr_document_ir.json", paddleocr_ir)
+    write_json(ir_dir / "fused_document_ir.json", document_ir)
     write_json(ir_dir / "document_ir.json", document_ir)
-    safe_progress(progress, f"Wrote dual document IR: {ir_dir / 'document_ir.json'}")
+    safe_progress(progress, f"Wrote dual fusion IR files: {ir_dir}")
 
     report = _initial_report(output_name, config, document_ir, mineru_artifacts, paddleocr_artifacts, source_path)
+    report["fusion"] = fusion_report
+    report["dual_parser"]["strategy"] = fusion_report.get("strategy") or "candidate_group_checked_ops"
     report["hybrid_enrichment"] = {
         "version": HYBRID_ENRICHMENT_VERSION,
         "enabled": True,
@@ -209,7 +229,7 @@ def _initial_report(
         },
         "dual_parser": {
             "version": DUAL_ADAPTER_VERSION,
-            "strategy": "mineru_primary_paddleocr_evidence",
+            "strategy": "candidate_group_checked_ops",
             "source": document_ir.get("source"),
             "mineru": {
                 "artifact_manifest": mineru_artifacts.to_manifest(),
@@ -302,6 +322,7 @@ def _page_report(
         "refiner": {"changed": False, "applied_ops": [], "dismissed": []},
         "assets": _page_assets(blocks),
         "dual_evidence": _dual_evidence_summary(page_ir),
+        "fusion": _fusion_summary(page_ir),
         "mineru": page_ir.get("mineru") or {},
         "paddleocr": (page_ir.get("dual_evidence") or {}).get("paddleocr") or {},
         "final": {
@@ -348,6 +369,18 @@ def _dual_evidence_summary(page_ir: dict[str, Any]) -> dict[str, Any]:
         "paddleocr_available": bool(paddle.get("available")),
         "mineru_block_count": mineru.get("block_count"),
         "paddleocr_block_count": paddle.get("block_count"),
+    }
+
+
+def _fusion_summary(page_ir: dict[str, Any]) -> dict[str, Any]:
+    fusion = page_ir.get("fusion") if isinstance(page_ir.get("fusion"), dict) else {}
+    return {
+        "version": fusion.get("version"),
+        "candidate_group_count": len(fusion.get("candidate_groups") or []),
+        "decision_count": len(fusion.get("decisions") or []),
+        "rejected_op_count": len(fusion.get("rejected_ops") or []),
+        "uncertain_count": len(fusion.get("uncertain_items") or []),
+        "backend": fusion.get("backend"),
     }
 
 

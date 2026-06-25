@@ -33,7 +33,7 @@ Expected secrets:
 - `mineru_hybrid`: explicit MinerU + DocPage2MD refinement mode.
 - `paddleocr_only`: PaddleOCR async artifact/API -> DocumentIR -> deterministic Markdown.
 - `paddleocr_hybrid`: PaddleOCR async artifact/API -> DocumentIR -> crop Vision + Brain JSON ops -> checked refiner -> deterministic Markdown.
-- `dual_hybrid`: MinerU and PaddleOCR both parse the same input; MinerU stays the primary layout/crop backbone, PaddleOCR is same-page evidence, then the existing crop Vision + Brain + checked refiner path decides.
+- `dual_hybrid`: MinerU and PaddleOCR both parse the same input; a fusion layer aligns pages, builds bbox/text/type candidate groups, applies checked whitelist fusion ops into `fused_document_ir.json`, then the existing crop Vision + Brain + checked refiner path runs on the fused IR.
 - `vision_only`: legacy image-folder flow under `doc_pages/`.
 
 GUI supports the main MinerU and PaddleOCR paths: local single file, local multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL. `vision_only` remains CLI-only for now. The run tab is a two-column workbench:
@@ -62,9 +62,11 @@ Dual engine implementation notes:
 - CLI supports local file(s)/folder and the artifact pair `--mineru-artifact-dir` + `--paddleocr-artifact-dir`.
 - Remote URL dual mode is not supported yet; generate both artifacts first, then run artifact fusion.
 - Dual mode currently blocks PDFs that exceed the PaddleOCR chunk size because chunked dual merge is not implemented.
-- Fusion code lives in `docpage2md_app/dual_ir.py` and `docpage2md_app/dual_pipeline.py`.
-- `dual_ir` must keep MinerU as the primary layout/crop source so existing hybrid parallelism stays intact.
-- Brain prompt receives compact `dual_evidence`; do not let Brain freely rewrite full Markdown.
+- Fusion code lives in `docpage2md_app/fusion.py`, `docpage2md_app/fusion_prompt.py`, `docpage2md_app/dual_ir.py` and `docpage2md_app/dual_pipeline.py`.
+- The fusion layer writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json`.
+- Fusion uses candidate groups and whitelist actions only: `choose_block`, `merge_blocks`, `keep_both`, `mark_uncertain`, `attach_image`, `replace_formula`, `convert_text_to_formula`, `convert_text_to_figure_note`.
+- `dual_ir` is a compatibility wrapper; new behavior should go through `fusion.py`.
+- Keep existing hybrid parallelism intact after fusion. Do not let Brain freely rewrite full Markdown.
 
 ## Parallelism
 
@@ -118,7 +120,7 @@ Latest dual engine real verification:
 
 - Real PaddleOCR API was confirmed with `tests/群论笔记4.1.pdf`, page range `1`, using `PADDLEOCR_API_TOKEN` from the process environment.
 - PaddleOCR-only probe output: `markdown_output/paddleocr_api_probe_20260625/paddleocr_api_probe_page1`, `status=ok`, `engine_mode=paddleocr_only`, with `paddleocr_raw/result.jsonl`, `ir/`, `assets/`, `Slide_01.md` and `run_report.json`.
-- Dual real probe output: `markdown_output/dual_real_probe_20260625/dual_real_probe_page1`, `status=ok`, `engine_mode=dual_hybrid`, strategy `mineru_primary_paddleocr_evidence`.
+- Dual real probe output: `markdown_output/dual_real_probe_20260625/dual_real_probe_page1`, `status=ok`, `engine_mode=dual_hybrid`; it was generated before the candidate-group fusion upgrade and used the old `mineru_primary_paddleocr_evidence` strategy.
 - After renderer duplicate-prefix protection, artifact rerun output: `markdown_output/dual_real_artifact_rerun_20260625/dual_real_artifact_rerun_page1`.
   - `status=ok`, pages `1/1`, layout model `vlm+PaddleOCR-VL-1.6`.
   - Vision `qwen3-vl-plus`, Brain `deepseek-v4-flash`.
