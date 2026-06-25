@@ -83,6 +83,10 @@
   - OpenAI-compatible 继续只发现 `/models`，价格保持 `user_required`，不自动猜测。
   - DashScope 官方文档抓取会过滤明显的文档 slug 伪模型，例如 `qwen-false`、`qwen-usage-list` 和 `qwen-vl-compatible-with-openai`。
 - 修复 Tkinter GUI 自动化/关闭时可能残留 `_drain_output_queue` after 回调并打印 Tcl 噪声的问题。
+- 修复 Tkinter GUI 非全屏窗口下的信息截断问题：
+  - 运行页改为可垂直滚动，避免“输出与并发”被首屏高度挤出。
+  - 成本摘要动态换行，成本表支持横向滚动。
+  - 命令预览支持横向滚动、一键复制和完整命令窗口。
 - 继续加强最终 Markdown 的数学符号规范化：
   - 单个裸 Unicode 数学符号会包成 LaTeX inline math。
   - `G→S`、`k→g→?` 这类箭头表达式会作为完整公式片段处理，避免生成重叠 `$...$`。
@@ -95,9 +99,9 @@
 
 - `python docpage2md.py --help`：通过。
 - `python -m docpage2md_app --help`：通过。
-- `python -m pytest -q`：292 passed。
+- `python -m pytest -q`：300 passed。
 - `git diff --check`：无 whitespace error，仅有 CRLF 提示。
-- Tkinter GUI 构建 smoke 通过：`DocPage2MdGui()` 能创建、刷新 idle tasks 并销毁。
+- Tkinter GUI 构建 smoke 通过：`DocPage2MdGui()` 能创建、刷新 idle tasks 并销毁；运行页滚动容器、成本表横向滚动和命令预览横向滚动存在。
 - 聚焦 GUI/CLI/MinerU/secrets 测试：54 passed。
 - 聚焦 PaddleOCR/official catalog 测试：45 passed。
 - 聚焦 PaddleOCR hardening 测试：30 passed，覆盖坏 JSONL/空页、`429/503/504` 重试、下载重试、URL 200MB 限制和 provider 状态缓存。

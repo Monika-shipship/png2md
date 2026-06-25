@@ -36,10 +36,12 @@ Expected secrets:
 - `dual_hybrid`: MinerU and PaddleOCR both parse the same input; a fusion layer aligns pages, builds bbox/text/type candidate groups, applies checked whitelist fusion ops into `fused_document_ir.json`, then the existing crop Vision + Brain + checked refiner path runs on the fused IR.
 - `vision_only`: legacy image-folder flow under `doc_pages/`.
 
-GUI supports the main MinerU and PaddleOCR paths: local single file, local multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL. `vision_only` remains CLI-only for now. The run tab is a two-column workbench:
+GUI supports the main MinerU and PaddleOCR paths: local single file, local multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL. `vision_only` remains CLI-only for now. The run tab is a scrollable two-column workbench:
 
 - Left: workflow presets, visual input file table, output/concurrency, advanced MinerU settings.
 - Right: progress/ETA, cost table, command preview, Chinese logs, actions.
+
+Keep the run tab usable in non-fullscreen windows. The page-level canvas provides vertical scrolling, the cost table has horizontal scrolling, and command preview has copy/full-command affordances.
 
 Input UI should not expose a raw semicolon path string to normal users. Keep it as internal CLI compatibility only.
 
@@ -264,7 +266,7 @@ Most recent regression on 2026-06-25:
 
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
-- `python -m pytest -q`: `292 passed`.
+- `python -m pytest -q`: `300 passed`.
 - `git diff --check`: passed, with only CRLF conversion warnings.
 
 Focused smoke used during GUI/log work:

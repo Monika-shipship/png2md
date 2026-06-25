@@ -1659,12 +1659,49 @@ class DocPage2MdGui:
     def _build_run_tab(self, parent) -> None:
         tk = self.tk
         ttk = self.ttk
-        parent.columnconfigure(0, weight=0, minsize=540)
-        parent.columnconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(parent)
-        right = ttk.Frame(parent)
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0, background=self.root.cget("background"))
+        run_scroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=run_scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        run_scroll.grid(row=0, column=1, sticky="ns")
+
+        content = ttk.Frame(canvas)
+        content_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _refresh_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _fit_content_width(event) -> None:
+            canvas.itemconfigure(content_id, width=event.width)
+
+        def _scroll_run_tab(event) -> None:
+            widget_class = event.widget.winfo_class()
+            if widget_class in {"Text", "Treeview", "Entry", "TEntry", "TCombobox"}:
+                return
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        content.bind("<Configure>", _refresh_scroll_region)
+        canvas.bind("<Configure>", _fit_content_width)
+        def _bind_run_mousewheel(_event) -> None:
+            canvas.bind_all("<MouseWheel>", _scroll_run_tab)
+
+        def _unbind_run_mousewheel(_event) -> None:
+            canvas.unbind_all("<MouseWheel>")
+
+        content.bind("<Enter>", _bind_run_mousewheel)
+        content.bind("<Leave>", _unbind_run_mousewheel)
+        self.run_canvas = canvas
+
+        content.columnconfigure(0, weight=3, minsize=540)
+        content.columnconfigure(1, weight=2, minsize=520)
+        content.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(content)
+        right = ttk.Frame(content)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         right.grid(row=0, column=1, sticky="nsew")
         left.columnconfigure(0, weight=1)
@@ -1754,7 +1791,7 @@ class DocPage2MdGui:
         ttk.Button(toolbar, text="下移", command=lambda: self._move_selected_input(1)).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(toolbar, text="预览", command=self._preview_selected_input).grid(row=0, column=7, padx=(0, 6))
         columns = ("order", "name", "type", "size", "pages", "status")
-        self.input_tree = ttk.Treeview(source, columns=columns, show="headings", height=8)
+        self.input_tree = ttk.Treeview(source, columns=columns, show="headings", height=6)
         for col, label, width in [
             ("order", "#", 36),
             ("name", "文件名", 150),
@@ -1863,31 +1900,66 @@ class DocPage2MdGui:
         command.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         command.columnconfigure(0, weight=1)
         cost_header = ttk.Frame(command)
-        cost_header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        cost_header.grid(row=0, column=0, sticky="ew")
         cost_header.columnconfigure(0, weight=1)
-        ttk.Label(cost_header, textvariable=self.cost_summary_text, wraplength=760, justify="left").grid(row=0, column=0, sticky="ew")
-        self._help_button(cost_header, "cost").grid(row=0, column=1, padx=(8, 0), sticky="ne")
-        ttk.Button(cost_header, text="刷新估算", command=self._refresh_cost_estimate).grid(row=0, column=2, sticky="ne", padx=(8, 0))
-        ttk.Button(cost_header, text="刷新官方模型/价格", command=self._refresh_official_models_and_prices).grid(
-            row=0, column=3, sticky="ne", padx=(8, 0)
+        self.cost_summary_label = ttk.Label(
+            cost_header,
+            textvariable=self.cost_summary_text,
+            wraplength=520,
+            justify="left",
+        )
+        self.cost_summary_label.grid(row=0, column=0, sticky="ew")
+
+        def _resize_cost_summary(event) -> None:
+            self.cost_summary_label.configure(wraplength=max(260, event.width - 8))
+
+        cost_header.bind("<Configure>", _resize_cost_summary)
+
+        cost_actions = ttk.Frame(command)
+        cost_actions.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        cost_actions.columnconfigure(4, weight=1)
+        self._help_button(cost_actions, "cost").grid(row=0, column=0, sticky="w")
+        ttk.Button(cost_actions, text="刷新估算", command=self._refresh_cost_estimate).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(cost_actions, text="刷新官方模型/价格", command=self._refresh_official_models_and_prices).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
         )
         cost_columns = ("file", "pages", "crops", "input", "output", "cost", "confidence")
-        self.cost_tree = ttk.Treeview(command, columns=cost_columns, show="headings", height=4)
+        cost_table = ttk.Frame(command)
+        cost_table.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        cost_table.columnconfigure(0, weight=1)
+        self.cost_tree = ttk.Treeview(cost_table, columns=cost_columns, show="headings", height=4)
         for col, label, width in [
-            ("file", "文件", 190),
+            ("file", "文件", 220),
             ("pages", "页数", 70),
             ("crops", "裁剪块", 70),
-            ("input", "输入tokens", 94),
-            ("output", "输出tokens", 94),
-            ("cost", "费用", 74),
-            ("confidence", "可信度", 82),
+            ("input", "输入tokens", 110),
+            ("output", "输出tokens", 110),
+            ("cost", "费用", 84),
+            ("confidence", "可信度", 84),
         ]:
             self.cost_tree.heading(col, text=label)
-            self.cost_tree.column(col, width=width, anchor="w", stretch=col == "file")
-        self.cost_tree.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Entry(command, textvariable=self.command_preview, state="readonly").grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0)
-        )
+            self.cost_tree.column(col, width=width, minwidth=width, anchor="w", stretch=False)
+        self.cost_tree.grid(row=0, column=0, sticky="ew")
+        cost_y_scroll = ttk.Scrollbar(cost_table, orient="vertical", command=self.cost_tree.yview)
+        cost_y_scroll.grid(row=0, column=1, sticky="ns")
+        cost_x_scroll = ttk.Scrollbar(cost_table, orient="horizontal", command=self.cost_tree.xview)
+        cost_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.cost_tree.configure(yscrollcommand=cost_y_scroll.set, xscrollcommand=cost_x_scroll.set)
+
+        command_preview_frame = ttk.Frame(command)
+        command_preview_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        command_preview_frame.columnconfigure(0, weight=1)
+        command_tools = ttk.Frame(command_preview_frame)
+        command_tools.grid(row=0, column=0, sticky="ew")
+        command_tools.columnconfigure(0, weight=1)
+        ttk.Label(command_tools, text="命令预览").grid(row=0, column=0, sticky="w")
+        ttk.Button(command_tools, text="复制命令", command=self._copy_command_preview).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(command_tools, text="查看完整命令", command=self._open_command_preview_window).grid(row=0, column=2, padx=(6, 0))
+        self.command_preview_entry = ttk.Entry(command_preview_frame, textvariable=self.command_preview, state="readonly")
+        self.command_preview_entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        command_x_scroll = ttk.Scrollbar(command_preview_frame, orient="horizontal", command=self.command_preview_entry.xview)
+        command_x_scroll.grid(row=2, column=0, sticky="ew")
+        self.command_preview_entry.configure(xscrollcommand=command_x_scroll.set)
 
         log_frame = ttk.LabelFrame(right, text="运行日志", padding=12)
         log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -1899,7 +1971,7 @@ class DocPage2MdGui:
         ttk.Label(log_tools, text="中文进度日志；完整日志写入输出目录 process.log。").grid(row=0, column=0, sticky="w")
         ttk.Button(log_tools, text="放大日志", command=self._open_log_window).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(log_tools, text="清空显示", command=self._clear_log).grid(row=0, column=2, padx=(8, 0))
-        self.log_text = tk.Text(log_frame, wrap="word", height=18, state="disabled", font=("Consolas", 10))
+        self.log_text = tk.Text(log_frame, wrap="word", height=12, state="disabled", font=("Consolas", 10))
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scroll.grid(row=1, column=1, sticky="ns")
@@ -2861,6 +2933,36 @@ class DocPage2MdGui:
             self.command_preview.set(shell_quote_for_preview(command))
         except ValueError as exc:
             self.command_preview.set(str(exc))
+
+    def _copy_command_preview(self) -> None:
+        command = self.command_preview.get()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(command)
+        self.status_text.set("已复制命令预览")
+
+    def _open_command_preview_window(self) -> None:
+        window = self.tk.Toplevel(self.root)
+        window.title("DocPage2MD 完整命令")
+        window.geometry("1100x360")
+        window.minsize(720, 280)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        toolbar = self.ttk.Frame(window, padding=8)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        toolbar.columnconfigure(0, weight=1)
+        self.ttk.Label(toolbar, text="这里显示完整命令，可横向滚动或复制。").grid(row=0, column=0, sticky="w")
+        self.ttk.Button(toolbar, text="复制命令", command=self._copy_command_preview).grid(row=0, column=1, padx=(8, 0))
+
+        text = self.tk.Text(window, wrap="none", font=("Consolas", 10), height=8)
+        text.grid(row=1, column=0, sticky="nsew")
+        y_scroll = self.ttk.Scrollbar(window, orient="vertical", command=text.yview)
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        x_scroll = self.ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        x_scroll.grid(row=2, column=0, sticky="ew")
+        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text.insert("1.0", self.command_preview.get())
+        text.configure(state="disabled")
 
     def _refresh_runtime_summary(self) -> None:
         document_key = document_type_key(self.document_type.get())

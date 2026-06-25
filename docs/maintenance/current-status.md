@@ -28,7 +28,7 @@ DocPage2MD has five processing modes:
 - `dual_hybrid`: MinerU and PaddleOCR both parse the same input; a fusion layer aligns pages, builds bbox/text/type candidate groups, applies checked whitelist fusion ops into `fused_document_ir.json`, then DocPage2MD runs crop Vision + Brain + checked refiner on the fused IR.
 - `vision_only`: legacy image-folder flow for page images.
 
-The Tkinter GUI is the current lightweight desktop entry. It supports local single file, multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL inputs; Chinese labels/logs; progress/ETA; cost estimate; output folder opening; Vision/Brain worker controls; and model management. The run tab is split into left-side workflow/input/output controls and right-side progress/cost/log controls.
+The Tkinter GUI is the current lightweight desktop entry. It supports local single file, multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL inputs; Chinese labels/logs; progress/ETA; cost estimate; output folder opening; Vision/Brain worker controls; and model management. The run tab is a scrollable workbench split into left-side workflow/input/output controls and right-side progress/cost/log controls.
 
 Current GUI details:
 
@@ -38,6 +38,7 @@ Current GUI details:
 - MinerU defaults to `vlm`; HTML/HTM automatically uses `MinerU-HTML`; non-HTML cannot use `MinerU-HTML`.
 - Local PDF inputs can enable automatic MinerU page splitting, with final chunk merge/audit.
 - Cost UI is a table and only estimates Vision/Brain token fees; MinerU/PaddleOCR are quota/limit notes.
+- The run tab remains usable in non-fullscreen windows: the page scrolls vertically, the cost table scrolls horizontally, and command preview supports horizontal scrolling plus copy/full-command actions.
 - Model management is provider-first: Provider/Key, role binding, candidate models and third-party model library.
 - PaddleOCR is selectable as a parser engine, default model `PaddleOCR-VL-1.6`, async endpoint `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`, default PDF chunk size 100 pages.
 - Dual parser is selectable as `MinerU + PaddleOCR 双引擎融合`; it currently supports local files/folders and artifact pairs, not remote URLs or automatic chunked dual merge. It writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json`.
@@ -145,7 +146,7 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
-- `python -m pytest -q`: 292 passed.
+- `python -m pytest -q`: 300 passed.
 - `git diff --check`: passed, with only CRLF conversion warnings.
 - GUI construction smoke passed: `DocPage2MdGui()` can construct, update idle tasks and destroy cleanly after the input table/provider/cost redesign.
 - `python -m pytest tests/test_cli.py tests/test_gui.py tests/test_hybrid_enrichment.py tests/test_mineru_pipeline.py tests/test_files_and_session.py tests/test_run_logger.py -q`: 41 passed during GUI/log/performance work.

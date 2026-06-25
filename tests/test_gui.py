@@ -494,6 +494,9 @@ def test_gui_constructs_and_destroy_cancels_after_callbacks():
     try:
         app.root.withdraw()
         app.root.update_idletasks()
+        assert app.run_canvas.winfo_exists()
+        assert app.command_preview_entry.cget("xscrollcommand")
+        assert app.cost_tree.cget("xscrollcommand")
     finally:
         app.destroy()
     assert app._drain_after_id is None
