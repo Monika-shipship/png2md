@@ -94,8 +94,9 @@ class MinerUClient:
             file_item: dict[str, Any] = {
                 "name": path.name,
                 "data_id": _safe_data_id(path.stem),
-                "is_ocr": True,
             }
+            if self.config.mineru_model_version != "MinerU-HTML":
+                file_item["is_ocr"] = self.config.mineru_is_ocr
             if effective_page_ranges:
                 file_item["page_ranges"] = effective_page_ranges
             payload["files"].append(file_item)
@@ -254,11 +255,16 @@ class MinerUClient:
     def _default_payload(self, *, page_ranges: str | None = None, data_id: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model_version": self.config.mineru_model_version,
-            "enable_formula": True,
-            "enable_table": True,
-            "language": "ch",
-            "is_ocr": True,
         }
+        if self.config.mineru_model_version != "MinerU-HTML":
+            payload.update(
+                {
+                    "enable_formula": self.config.mineru_enable_formula,
+                    "enable_table": self.config.mineru_enable_table,
+                    "language": self.config.mineru_language,
+                    "is_ocr": self.config.mineru_is_ocr,
+                }
+            )
         page_ranges = page_ranges or self.config.mineru_page_ranges
         if page_ranges:
             payload["page_ranges"] = page_ranges
@@ -269,11 +275,16 @@ class MinerUClient:
     def _batch_payload(self, *, page_ranges: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model_version": self.config.mineru_model_version,
-            "enable_formula": True,
-            "enable_table": True,
-            "language": "ch",
             "files": [],
         }
+        if self.config.mineru_model_version != "MinerU-HTML":
+            payload.update(
+                {
+                    "enable_formula": self.config.mineru_enable_formula,
+                    "enable_table": self.config.mineru_enable_table,
+                    "language": self.config.mineru_language,
+                }
+            )
         # Filled by request_upload_urls so Path normalization is centralized there.
         return payload
 

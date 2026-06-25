@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from docpage2md_app import cli
+from docpage2md_app.files import write_json
+from docpage2md_app.input_inspection import build_page_chunks
 
 
 def test_eval_cli_runs_without_dependency_or_api_checks(monkeypatch, tmp_path, capsys):
@@ -58,6 +62,37 @@ def test_cli_build_config_exposes_mineru_multiformat_options(tmp_path):
     assert config.mineru_page_ranges == "1-5"
     assert config.model_brain == "deepseek-v4-pro"
     assert config.brain_provider == "deepseek"
+
+
+def test_cli_build_config_exposes_mineru_advanced_options(tmp_path):
+    args = cli.parse_args(
+        [
+            "--input-file",
+            "notes.pdf",
+            "--mineru-is-ocr",
+            "false",
+            "--mineru-enable-formula",
+            "true",
+            "--mineru-enable-table",
+            "false",
+            "--mineru-language",
+            "en",
+            "--auto-split-pages",
+            "--mineru-page-chunk-size",
+            "150",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+
+    config = cli.build_config(args)
+
+    assert config.mineru_is_ocr is False
+    assert config.mineru_enable_formula is True
+    assert config.mineru_enable_table is False
+    assert config.mineru_language == "en"
+    assert config.mineru_auto_split_pages is True
+    assert config.mineru_page_chunk_size == 150
 
 
 def test_cli_explicit_model_overrides_win_over_profile(tmp_path):
@@ -175,6 +210,54 @@ def test_mineru_batch_processing_writes_per_document_process_log(monkeypatch, tm
     assert "文档结构已就绪：共 1 页" in (tmp_path / "out" / "mineru_batch" / "process.log").read_text(encoding="utf-8")
 
 
+def test_cli_chunk_merge_renumbers_relative_slides(tmp_path):
+    output_dir = tmp_path / "out" / "Deck"
+    chunk_dir = tmp_path / "out" / "Deck__chunk_002"
+    (chunk_dir / "assets").mkdir(parents=True)
+    (chunk_dir / "assets" / "crop.png").write_bytes(b"png")
+    (chunk_dir / "ir").mkdir()
+    (chunk_dir / "ir" / "page_001_ir.json").write_text("{}", encoding="utf-8")
+    (chunk_dir / "mineru_raw").mkdir()
+    (chunk_dir / "mineru_raw" / "layout.json").write_text("{}", encoding="utf-8")
+    (chunk_dir / "Slide_01.md").write_text("# Slide 1\n\n![图](assets/crop.png)\n", encoding="utf-8")
+    write_json(chunk_dir / "Slide_01.meta.json", {"slide_no": 1, "status": "ok"})
+    write_json(
+        chunk_dir / "run_report.json",
+        {
+            "doc_name": "Deck__chunk_002",
+            "status": "ok",
+            "models": {},
+            "cost": {"estimated": None, "actual_tokens": None, "note": ""},
+            "mineru": {},
+            "pages": [
+                {
+                    "slide_no": 1,
+                    "final": {"status": "ok", "included_in_full": True},
+                    "validation": {"warnings": []},
+                }
+            ],
+        },
+    )
+    chunks = build_page_chunks(401, chunk_size=200)
+
+    cli._merge_chunk_outputs(
+        output_dir,
+        "Deck",
+        [{"index": 2, "output_dir": str(chunk_dir)}],
+        chunks,
+        progress=None,
+    )
+
+    merged_slide = output_dir / "Slide_201.md"
+    assert merged_slide.exists()
+    text = merged_slide.read_text(encoding="utf-8")
+    assert text.startswith("# Slide 201")
+    assert "assets/chunk_002/crop.png" in text
+    assert (output_dir / "assets" / "chunk_002" / "crop.png").exists()
+    report = Path(output_dir / "run_report.json")
+    assert report.exists()
+
+
 def test_cli_resolves_mineru_folder_batch_inputs(tmp_path):
     keep_pdf = tmp_path / "a.pdf"
     keep_docx = tmp_path / "b.docx"
@@ -216,6 +299,27 @@ def test_cli_missing_mineru_token_returns_clean_error(monkeypatch, tmp_path, cap
     assert code == 1
     assert "MinerU API 失败" in captured.out
     assert "MINERU_API_TOKEN" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_cli_missing_paddleocr_artifact_returns_clean_error(tmp_path, capsys):
+    missing = tmp_path / "missing_artifact"
+
+    code = cli.main(
+        [
+            "--engine-mode",
+            "paddleocr_only",
+            "--paddleocr-artifact-dir",
+            str(missing),
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "PaddleOCR artifact 处理失败" in captured.out
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
 

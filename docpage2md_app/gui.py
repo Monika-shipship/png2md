@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
@@ -16,6 +17,22 @@ from .cli import MINERU_SUPPORTED_SUFFIXES
 from .config import AppConfig
 from .cost import calculate_image_tokens, estimate_deepseek_chat_tokens, estimate_price, estimate_text_cost
 from .env import get_env_value, set_user_env_value
+from .input_inspection import (
+    HTML_SUFFIXES,
+    IMAGE_SUFFIXES,
+    MINERU_SINGLE_REQUEST_PAGE_LIMIT,
+    PADDLEOCR_DAILY_PAGE_LIMIT_PER_MODEL,
+    PADDLEOCR_LOCAL_FILE_LIMIT_BYTES,
+    PADDLEOCR_RECOMMENDED_CHUNK_PAGES,
+    PAGE_RANGE_RE,
+    build_page_chunks,
+    count_page_ranges as inspect_count_page_ranges,
+    estimate_path_pages as inspect_estimate_path_pages,
+    estimate_pdf_pages as inspect_estimate_pdf_pages,
+    format_file_size,
+    infer_mineru_model_version,
+    validate_mineru_model_version_for_paths,
+)
 from .log_translate import (
     CROP_VISION_START_RE,
     DOCUMENT_READY_RE,
@@ -25,7 +42,15 @@ from .log_translate import (
     LOG_MESSAGE_RE,
     MINERU_BATCH_SUBMITTED_RE,
     MINERU_PROCESSED_RE,
+    PADDLEOCR_DOCUMENT_READY_RE,
+    PADDLEOCR_PAGE_RENDERED_RE,
+    PADDLEOCR_RENDERING_PAGE_RE,
+    PADDLEOCR_RUNNING_RE,
     PAGE_RENDERED_RE,
+    ZH_PADDLEOCR_DOCUMENT_READY_RE,
+    ZH_PADDLEOCR_PAGE_RENDERED_RE,
+    ZH_PADDLEOCR_RENDERING_PAGE_RE,
+    ZH_PADDLEOCR_RUNNING_RE,
     ZH_CROP_VISION_START_RE,
     ZH_DOCUMENT_READY_RE,
     ZH_HYBRID_PAGE_BRAIN_START_RE,
@@ -41,8 +66,11 @@ from .model_profiles import apply_model_profile
 from .model_settings import apply_model_settings, load_model_settings, save_model_settings
 from .mineru_adapter import adapt_mineru_artifacts
 from .mineru_artifacts import discover_mineru_artifacts, resolve_artifact_image
+from .paddleocr_adapter import adapt_paddleocr_artifacts
+from .paddleocr_artifacts import discover_paddleocr_artifacts, resolve_artifact_image as resolve_paddleocr_artifact_image
 from .third_party_models import (
     delete_third_party_model,
+    discover_openai_compatible_models,
     filter_registry_models,
     load_third_party_models,
     parse_bulk_models_text,
@@ -50,6 +78,7 @@ from .third_party_models import (
     update_third_party_model_verification,
     upsert_third_party_model,
 )
+from .secrets import check_secret_exists, set_secret_value
 
 
 DOCUMENT_PRESETS = {
@@ -71,14 +100,32 @@ DOCUMENT_PRESET_DESCRIPTIONS = {
 
 ENGINE_MODE_LABELS = {
     "hybrid": "混合精修（推荐）",
+    "mineru_hybrid": "MinerU + Markdown 精修",
     "mineru_only": "仅 MinerU 解析（最快）",
+    "paddleocr_hybrid": "PaddleOCR + Markdown 精修",
+    "paddleocr_only": "仅 PaddleOCR 解析",
 }
 ENGINE_MODE_LABEL_TO_KEY = {label: key for key, label in ENGINE_MODE_LABELS.items()}
 ENGINE_MODE_DESCRIPTIONS = {
     "hybrid": "先上传/读取 MinerU 结果，再对所有页和裁剪块并行调用 Vision/Brain 精修；质量更好，成本更高。",
+    "mineru_hybrid": "等价于旧 hybrid：MinerU 负责版面和裁剪，DocPage2MD 继续并行精修。",
     "mineru_only": "只把 MinerU 解析结果渲染成 Markdown，不调用 Vision/Brain；速度最快，适合排版清楚的 PDF。",
+    "paddleocr_hybrid": "PaddleOCR 负责 OCR/layout/Markdown 初稿，DocPage2MD 继续并行精修公式、图示、表格和结构。",
+    "paddleocr_only": "只把 PaddleOCR 结果渲染为 Markdown，不调用 Vision/Brain；PaddleOCR 按平台额度管理，不计入模型 token 成本。",
     "vision_only": "旧版图片目录流程，只在 CLI 中使用；GUI 主路径暂不启用。",
 }
+
+LAYOUT_ENGINE_LABELS = {
+    "mineru": "MinerU",
+    "paddleocr": "PaddleOCR",
+    "none": "不使用解析引擎",
+}
+LAYOUT_ENGINE_LABEL_TO_KEY = {label: key for key, label in LAYOUT_ENGINE_LABELS.items()}
+REFINE_MODE_LABELS = {
+    "docpage2md": "开启 DocPage2MD 精修",
+    "none": "关闭精修",
+}
+REFINE_MODE_LABEL_TO_KEY = {label: key for key, label in REFINE_MODE_LABELS.items()}
 
 MODEL_PROFILE_LABELS = {
     "cheap": "省钱",
@@ -99,14 +146,46 @@ SOURCE_LABELS = {
     "input_files": "本地多个文件",
     "input_folder": "本地文件夹批量",
     "mineru_artifact_dir": "MinerU artifact 目录",
+    "paddleocr_artifact_dir": "PaddleOCR artifact 目录",
     "mineru_url": "远程文件 URL",
 }
 SOURCE_LABEL_TO_KEY = {label: key for key, label in SOURCE_LABELS.items()}
 
-PAGE_RANGE_RE = re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
-SUPPORTED_ENGINE_MODES = {"mineru_only", "hybrid"}
-SUPPORTED_PROVIDERS = ["dashscope", "dashscope_openai", "deepseek", "openai_compatible"]
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp"}
+PROVIDER_PRESETS = {
+    "MinerU": {
+        "provider": "mineru",
+        "base_url": "https://mineru.net",
+        "api_key_env": "MINERU_API_TOKEN",
+        "help_url": "https://mineru.net/apiManage/token",
+    },
+    "PaddleOCR": {
+        "provider": "paddleocr",
+        "base_url": "https://paddleocr.aistudio-app.com",
+        "api_key_env": "PADDLEOCR_API_TOKEN",
+        "help_url": "https://aistudio.baidu.com/paddleocr/task",
+    },
+    "DashScope": {
+        "provider": "dashscope_openai",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "help_url": "https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key",
+    },
+    "DeepSeek": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "help_url": "https://platform.deepseek.com/api_keys",
+    },
+    "OpenAI-compatible": {
+        "provider": "openai_compatible",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "help_url": "",
+    },
+}
+
+SUPPORTED_ENGINE_MODES = {"mineru_only", "hybrid", "mineru_hybrid", "paddleocr_only", "paddleocr_hybrid"}
+SUPPORTED_PROVIDERS = ["dashscope", "dashscope_openai", "deepseek", "openai_compatible", "paddleocr"]
 VISION_COST_BLOCK_TYPES = {"figure_note", "image_ref", "table", "formula_block"}
 ROUGH_PDF_CROP_BLOCKS_PER_PAGE = 3
 ROUGH_CROP_IMAGE_TOKENS = 1800
@@ -125,9 +204,22 @@ class SelectedModel:
 
 
 @dataclass(frozen=True)
+class InputFileInfo:
+    path: Path
+    name: str
+    suffix: str
+    size_text: str
+    pages: int | None
+    limit_status: str
+    order: int
+
+
+@dataclass(frozen=True)
 class GuiRunOptions:
     document_type: str = "handwritten_notes"
     engine_mode: str = "hybrid"
+    layout_engine: str = "mineru"
+    refine_mode: str = "docpage2md"
     model_profile: str = "balanced"
     source_kind: str = "input_file"
     source_value: str = ""
@@ -135,6 +227,23 @@ class GuiRunOptions:
     session_name: str = ""
     page_ranges: str = ""
     mineru_model_version: str = "vlm"
+    mineru_is_ocr: bool = AppConfig().mineru_is_ocr
+    mineru_enable_formula: bool = AppConfig().mineru_enable_formula
+    mineru_enable_table: bool = AppConfig().mineru_enable_table
+    mineru_language: str = AppConfig().mineru_language
+    mineru_auto_split_pages: bool = True
+    mineru_page_chunk_size: int | str = AppConfig().mineru_page_chunk_size
+    paddleocr_model: str = AppConfig().paddleocr_model
+    paddleocr_api_key_env: str = AppConfig().paddleocr_api_key_env
+    paddleocr_base_url: str = AppConfig().paddleocr_base_url
+    paddleocr_page_chunk_size: int | str = AppConfig().paddleocr_page_chunk_size
+    paddleocr_doc_orientation: bool = AppConfig().paddleocr_doc_orientation
+    paddleocr_doc_unwarping: bool = AppConfig().paddleocr_doc_unwarping
+    paddleocr_chart_recognition: bool = AppConfig().paddleocr_chart_recognition
+    paddleocr_layout_detection: bool = AppConfig().paddleocr_layout_detection
+    paddleocr_formula_recognition: bool = AppConfig().paddleocr_formula_recognition
+    paddleocr_table_recognition: bool = AppConfig().paddleocr_table_recognition
+    paddleocr_visualize: bool = AppConfig().paddleocr_visualize
     recursive: bool = False
     vision_workers: int | str = AppConfig().vision_batch_workers
     brain_workers: int | str = AppConfig().brain_batch_workers
@@ -197,6 +306,31 @@ def engine_mode_label(value: str) -> str:
     return ENGINE_MODE_LABELS.get(engine_mode_key(value), value)
 
 
+def layout_engine_key(value: str) -> str:
+    return LAYOUT_ENGINE_LABEL_TO_KEY.get(value, value)
+
+
+def refine_mode_key(value: str) -> str:
+    return REFINE_MODE_LABEL_TO_KEY.get(value, value)
+
+
+def workflow_engine_mode(options: GuiRunOptions) -> str:
+    layout = layout_engine_key(options.layout_engine)
+    refine = refine_mode_key(options.refine_mode)
+    explicit = engine_mode_key(options.engine_mode)
+    if explicit in {"mineru_only", "mineru_hybrid", "paddleocr_only", "paddleocr_hybrid"}:
+        return explicit
+    if explicit == "hybrid" and layout == "mineru" and refine == "docpage2md":
+        return "hybrid"
+    if layout == "mineru":
+        return "mineru_hybrid" if refine == "docpage2md" else "mineru_only"
+    if layout == "paddleocr":
+        return "paddleocr_hybrid" if refine == "docpage2md" else "paddleocr_only"
+    if explicit in SUPPORTED_ENGINE_MODES:
+        return explicit
+    return "vision_only"
+
+
 def model_profile_key(value: str) -> str:
     return MODEL_PROFILE_LABEL_TO_KEY.get(value, value)
 
@@ -222,10 +356,14 @@ def default_model_selection(profile: str = "balanced", base_config: AppConfig | 
 
 
 def build_cli_argv(options: GuiRunOptions) -> list[str]:
-    engine_mode = engine_mode_key(options.engine_mode)
+    if engine_mode_key(options.engine_mode) == "vision_only":
+        raise ValueError("GUI 目前不支持 vision_only；旧版纯视觉流程请继续使用 CLI。")
+    engine_mode = workflow_engine_mode(options)
+    layout_engine = layout_engine_key(options.layout_engine)
+    refine_mode = refine_mode_key(options.refine_mode)
     model_profile = model_profile_key(options.model_profile)
     if engine_mode not in SUPPORTED_ENGINE_MODES:
-        raise ValueError("GUI 目前支持 mineru_only / hybrid 主路径。旧版 vision_only 请继续使用 CLI。")
+        raise ValueError("GUI 目前支持 MinerU/PaddleOCR 解析主路径。旧版 vision_only 请继续使用 CLI。")
     document_type = document_type_key(options.document_type)
     source_kind = source_kind_key(options.source_kind)
     if document_type not in DOCUMENT_PRESETS:
@@ -234,14 +372,27 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
         raise ValueError(f"未知模型档位: {options.model_profile}")
     if source_kind not in SOURCE_LABELS:
         raise ValueError(f"未知输入来源: {options.source_kind}")
+    if source_kind == "mineru_artifact_dir" and layout_engine != "mineru":
+        raise ValueError("MinerU artifact 目录只能配合 MinerU 解析引擎使用。")
+    if source_kind == "paddleocr_artifact_dir" and layout_engine != "paddleocr":
+        raise ValueError("PaddleOCR artifact 目录只能配合 PaddleOCR 解析引擎使用。")
 
     page_ranges = options.page_ranges.strip().replace(" ", "")
     if page_ranges and not PAGE_RANGE_RE.match(page_ranges):
         raise ValueError("页码范围格式应类似 1-10 或 2,4-6。")
 
+    source_value = options.source_value.strip()
+    if not source_value:
+        raise ValueError("请选择或填写输入来源。")
+    mineru_model_version = effective_mineru_model_version(options) if layout_engine == "mineru" else ((options.mineru_model_version or "vlm").strip() or "vlm")
+
     argv = [
         "--engine-mode",
         engine_mode,
+        "--layout-engine",
+        layout_engine,
+        "--refine-mode",
+        refine_mode,
         "--document-type",
         document_type,
         "--model-profile",
@@ -253,8 +404,49 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
         argv.extend(["--name", options.session_name.strip()])
     if page_ranges:
         argv.extend(["--page-ranges", page_ranges])
-    if options.mineru_model_version:
-        argv.extend(["--mineru-model-version", options.mineru_model_version])
+    argv.extend(
+        [
+            "--mineru-model-version",
+            mineru_model_version,
+            "--mineru-is-ocr",
+            _bool_arg(options.mineru_is_ocr),
+            "--mineru-enable-formula",
+            _bool_arg(options.mineru_enable_formula),
+            "--mineru-enable-table",
+            _bool_arg(options.mineru_enable_table),
+            "--mineru-language",
+            (options.mineru_language or "ch").strip() or "ch",
+        ]
+    )
+    if options.mineru_auto_split_pages:
+        chunk_size = _positive_worker_count(options.mineru_page_chunk_size, "MinerU 分段页数")
+        argv.extend(["--auto-split-pages", "--mineru-page-chunk-size", str(chunk_size)])
+    argv.extend(
+        [
+            "--paddleocr-model",
+            (options.paddleocr_model or "PaddleOCR-VL-1.6").strip() or "PaddleOCR-VL-1.6",
+            "--paddleocr-api-key-env",
+            (options.paddleocr_api_key_env or "PADDLEOCR_API_TOKEN").strip() or "PADDLEOCR_API_TOKEN",
+            "--paddleocr-base-url",
+            (options.paddleocr_base_url or "https://paddleocr.aistudio-app.com").strip() or "https://paddleocr.aistudio-app.com",
+            "--paddleocr-page-chunk-size",
+            str(_positive_worker_count(options.paddleocr_page_chunk_size, "PaddleOCR 分段页数")),
+            "--paddleocr-doc-orientation",
+            _bool_arg(options.paddleocr_doc_orientation),
+            "--paddleocr-doc-unwarping",
+            _bool_arg(options.paddleocr_doc_unwarping),
+            "--paddleocr-chart-recognition",
+            _bool_arg(options.paddleocr_chart_recognition),
+            "--paddleocr-layout-detection",
+            _bool_arg(options.paddleocr_layout_detection),
+            "--paddleocr-formula-recognition",
+            _bool_arg(options.paddleocr_formula_recognition),
+            "--paddleocr-table-recognition",
+            _bool_arg(options.paddleocr_table_recognition),
+            "--paddleocr-visualize",
+            _bool_arg(options.paddleocr_visualize),
+        ]
+    )
     vision_workers = _positive_worker_count(options.vision_workers, "Vision 并发数")
     brain_workers = _positive_worker_count(options.brain_workers, "Brain 并发数")
     argv.extend(["--vision-workers", str(vision_workers), "--brain-workers", str(brain_workers)])
@@ -286,9 +478,6 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
             ]
         )
 
-    source_value = options.source_value.strip()
-    if not source_value:
-        raise ValueError("请选择或填写输入来源。")
     if source_kind == "input_file":
         argv.extend(["--input-file", source_value.strip('"')])
     elif source_kind == "input_files":
@@ -303,8 +492,13 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
             argv.append("--recursive")
     elif source_kind == "mineru_artifact_dir":
         argv.extend(["--mineru-artifact-dir", source_value.strip('"')])
+    elif source_kind == "paddleocr_artifact_dir":
+        argv.extend(["--paddleocr-artifact-dir", source_value.strip('"')])
     elif source_kind == "mineru_url":
-        argv.extend(["--mineru-url", source_value])
+        if layout_engine == "paddleocr":
+            argv.extend(["--paddleocr-url", source_value])
+        else:
+            argv.extend(["--mineru-url", source_value])
 
     argv.extend(options.extra_args)
     return argv
@@ -318,6 +512,97 @@ def _positive_worker_count(value: int | str, label: str) -> int:
     if count < 1:
         raise ValueError(f"{label}必须是正整数。")
     return count
+
+
+def _bool_arg(value: bool) -> str:
+    return "true" if bool(value) else "false"
+
+
+def effective_mineru_model_version(options: GuiRunOptions) -> str:
+    selected = (options.mineru_model_version or "vlm").strip() or "vlm"
+    source_kind = source_kind_key(options.source_kind)
+    paths = local_input_paths_for_options(options, require_exists=False)
+    if paths:
+        inferred = infer_mineru_model_version(paths, selected)
+        validate_mineru_model_version_for_paths(paths, inferred)
+        return inferred
+    if source_kind == "mineru_url":
+        parsed_path = urllib.parse.urlsplit(options.source_value.strip()).path
+        suffix = Path(parsed_path).suffix.lower()
+        if suffix in HTML_SUFFIXES:
+            return "MinerU-HTML"
+    return selected
+
+
+def local_input_paths_for_options(options: GuiRunOptions, *, require_exists: bool) -> list[Path]:
+    source_kind = source_kind_key(options.source_kind)
+    if source_kind == "input_file":
+        paths = [Path(options.source_value.strip().strip('"'))]
+    elif source_kind == "input_files":
+        paths = [Path(item) for item in split_multi_paths(options.source_value)]
+    elif source_kind == "input_folder":
+        folder = Path(options.source_value.strip().strip('"'))
+        if not folder.exists() or not folder.is_dir():
+            return [] if not require_exists else [folder]
+        iterator = folder.rglob("*") if options.recursive else folder.glob("*")
+        if layout_engine_key(options.layout_engine) == "paddleocr":
+            allowed = IMAGE_SUFFIXES | {".pdf"}
+        else:
+            allowed = MINERU_SUPPORTED_SUFFIXES
+        paths = sorted(
+            [path for path in iterator if path.is_file() and path.suffix.lower() in allowed],
+            key=lambda path: str(path).lower(),
+        )
+    else:
+        paths = []
+    if require_exists:
+        return paths
+    return paths
+
+
+def validate_selected_models(vision: SelectedModel | None, brain: SelectedModel | None) -> list[str]:
+    issues: list[str] = []
+    issues.extend(_validate_selected_model("Vision", vision, requires_vision=True))
+    issues.extend(_validate_selected_model("Brain", brain, requires_vision=False))
+    return issues
+
+
+def _validate_selected_model(role_label: str, selected: SelectedModel | None, *, requires_vision: bool) -> list[str]:
+    if selected is None:
+        return [f"{role_label} 模型未配置。"]
+    issues: list[str] = []
+    provider = selected.provider.strip()
+    model = selected.model.strip()
+    base_url = selected.base_url.strip()
+    api_key_env = selected.api_key_env.strip()
+    if not provider:
+        issues.append(f"{role_label} provider 不能为空。")
+    elif provider not in SUPPORTED_PROVIDERS:
+        issues.append(f"{role_label} provider 不支持: {provider}。")
+    if not model:
+        issues.append(f"{role_label} 模型 ID 不能为空。")
+    if provider not in {"dashscope"} and not base_url:
+        issues.append(f"{role_label} Base URL 不能为空。")
+    if not api_key_env:
+        issues.append(f"{role_label} Key 环境变量名不能为空。")
+    if requires_vision and provider == "deepseek":
+        issues.append("Vision 不能使用 DeepSeek；DeepSeek 当前只用于 Brain 文本精修。")
+    return issues
+
+
+def missing_model_key_messages(vision: SelectedModel | None, brain: SelectedModel | None) -> list[str]:
+    messages: list[str] = []
+    seen: set[str] = set()
+    for role_label, selected in (("Vision", vision), ("Brain", brain)):
+        if selected is None:
+            continue
+        env_name = selected.api_key_env.strip()
+        if not env_name or env_name in seen:
+            continue
+        seen.add(env_name)
+        if not get_env_value(env_name):
+            messages.append(f"{role_label} 需要环境变量 {env_name}，当前未检测到。")
+    return messages
 
 
 def build_process_command(options: GuiRunOptions, repo_root: Path | None = None) -> list[str]:
@@ -338,76 +623,114 @@ def shell_quote_for_preview(parts: Iterable[str]) -> str:
 
 
 def count_page_ranges(page_ranges: str, total_pages: int | None = None) -> int | None:
-    text = page_ranges.strip().replace(" ", "")
-    if not text:
-        return total_pages
-    if not PAGE_RANGE_RE.match(text):
-        return None
-    selected: set[int] = set()
-    for part in text.split(","):
-        if "-" in part:
-            start_text, end_text = part.split("-", 1)
-            start = int(start_text)
-            end = int(end_text)
-        else:
-            start = end = int(part)
-        if end < start:
-            return None
-        if total_pages is not None:
-            end = min(end, total_pages)
-        selected.update(range(start, end + 1))
-    if total_pages is not None:
-        selected = {page for page in selected if 1 <= page <= total_pages}
-    return len(selected)
+    return inspect_count_page_ranges(page_ranges, total_pages)
 
 
 def estimate_pdf_pages(path: Path) -> int | None:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    count = len(re.findall(rb"/Type\s*/Page(?!s)\b", data))
-    return count or None
+    return inspect_estimate_pdf_pages(path)
 
 
 def estimate_path_pages(path: Path, page_ranges: str = "") -> int | None:
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        pages = estimate_pdf_pages(path)
-        return count_page_ranges(page_ranges, pages) if pages else None
-    if suffix in IMAGE_SUFFIXES:
-        return 1
-    return None
+    return inspect_estimate_path_pages(path, page_ranges)
 
 
 def source_paths_for_estimate(options: GuiRunOptions) -> list[Path]:
-    source_kind = source_kind_key(options.source_kind)
-    if source_kind == "input_file":
-        return [Path(options.source_value.strip().strip('"'))]
-    if source_kind == "input_files":
-        return [Path(item) for item in split_multi_paths(options.source_value)]
-    if source_kind == "input_folder":
-        folder = Path(options.source_value.strip().strip('"'))
-        if not folder.exists() or not folder.is_dir():
-            return []
-        iterator = folder.rglob("*") if options.recursive else folder.glob("*")
-        return sorted(
-            [path for path in iterator if path.is_file() and path.suffix.lower() in MINERU_SUPPORTED_SUFFIXES],
-            key=lambda path: str(path).lower(),
+    return local_input_paths_for_options(options, require_exists=False)
+
+
+def describe_input_files(paths: list[Path], page_ranges: str = "") -> list[InputFileInfo]:
+    infos: list[InputFileInfo] = []
+    for index, path in enumerate(paths, start=1):
+        suffix = path.suffix.lower()
+        try:
+            size = path.stat().st_size if path.exists() else None
+        except OSError:
+            size = None
+        pages = estimate_path_pages(path, page_ranges) if path.exists() else None
+        infos.append(
+            InputFileInfo(
+                path=path,
+                name=path.name or str(path),
+                suffix=suffix,
+                size_text=format_file_size(size),
+                pages=pages,
+                limit_status=input_limit_status(path, pages, size),
+                order=index,
+            )
         )
-    return []
+    return infos
+
+
+def input_limit_status(path: Path, pages: int | None, size_bytes: int | None) -> str:
+    suffix = path.suffix.lower()
+    if suffix in HTML_SUFFIXES:
+        return "HTML：自动使用 MinerU-HTML"
+    notes: list[str] = []
+    if suffix == ".pdf":
+        if pages is None:
+            notes.append("页数未知")
+        elif pages > MINERU_SINGLE_REQUEST_PAGE_LIMIT:
+            chunks = len(build_page_chunks(pages, chunk_size=MINERU_SINGLE_REQUEST_PAGE_LIMIT))
+            notes.append(f"MinerU 将分 {chunks} 段")
+        else:
+            notes.append("MinerU 单次可处理")
+        if pages is not None and pages > PADDLEOCR_RECOMMENDED_CHUNK_PAGES:
+            notes.append("PaddleOCR 建议分段")
+    if size_bytes is not None and size_bytes > PADDLEOCR_LOCAL_FILE_LIMIT_BYTES:
+        notes.append("PaddleOCR 本地上传超 50MB")
+    return "；".join(notes) if notes else "正常"
+
+
+def _input_summary(infos: list[InputFileInfo], source_kind: str, source_value: str) -> str:
+    if source_kind == "mineru_url":
+        return f"远程 URL：{source_value or '未填写'}。页数未知，运行后以平台返回为准。"
+    if source_kind == "mineru_artifact_dir":
+        return f"MinerU artifact 目录：{source_value or '未选择'}。"
+    if source_kind == "paddleocr_artifact_dir":
+        return f"PaddleOCR artifact 目录：{source_value or '未选择'}。"
+    if source_kind == "input_folder" and not infos:
+        return f"文件夹：{source_value or '未选择'}。未扫描到支持的文件。"
+    if not infos:
+        return "还没有选择输入文件。"
+    known_pages = [info.pages for info in infos if info.pages is not None]
+    page_text = f"{sum(known_pages)} 页" if len(known_pages) == len(infos) else "部分页数未知"
+    split_count = sum(1 for info in infos if "分" in info.limit_status)
+    split_text = f"，{split_count} 个文件将自动分段" if split_count else ""
+    return f"已选择 {len(infos)} 个文件，{page_text}{split_text}。处理顺序按表格从上到下。"
 
 
 def selected_config_from_options(options: GuiRunOptions, base_config: AppConfig | None = None) -> AppConfig:
     config = apply_model_profile(base_config or AppConfig(), model_profile_key(options.model_profile))
+    engine_mode = workflow_engine_mode(options)
+    layout_engine = layout_engine_key(options.layout_engine)
+    refine_mode = refine_mode_key(options.refine_mode)
     config = replace(
         config,
-        engine_mode=engine_mode_key(options.engine_mode),
+        engine_mode=engine_mode,
+        layout_engine=layout_engine,
+        refine_mode=refine_mode,
         document_type=document_type_key(options.document_type),
         model_profile=model_profile_key(options.model_profile),
         output_folder=options.output_folder,
-        mineru_model_version=options.mineru_model_version,
+        mineru_model_version=effective_mineru_model_version(options) if layout_engine == "mineru" else ((options.mineru_model_version or "vlm").strip() or "vlm"),
         mineru_page_ranges=options.page_ranges or None,
+        mineru_is_ocr=options.mineru_is_ocr,
+        mineru_enable_formula=options.mineru_enable_formula,
+        mineru_enable_table=options.mineru_enable_table,
+        mineru_language=(options.mineru_language or "ch").strip() or "ch",
+        mineru_auto_split_pages=options.mineru_auto_split_pages,
+        mineru_page_chunk_size=_positive_worker_count(options.mineru_page_chunk_size, "MinerU 分段页数"),
+        paddleocr_model=(options.paddleocr_model or "PaddleOCR-VL-1.6").strip() or "PaddleOCR-VL-1.6",
+        paddleocr_api_key_env=(options.paddleocr_api_key_env or "PADDLEOCR_API_TOKEN").strip() or "PADDLEOCR_API_TOKEN",
+        paddleocr_base_url=(options.paddleocr_base_url or "https://paddleocr.aistudio-app.com").strip() or "https://paddleocr.aistudio-app.com",
+        paddleocr_page_chunk_size=_positive_worker_count(options.paddleocr_page_chunk_size, "PaddleOCR 分段页数"),
+        paddleocr_doc_orientation=options.paddleocr_doc_orientation,
+        paddleocr_doc_unwarping=options.paddleocr_doc_unwarping,
+        paddleocr_chart_recognition=options.paddleocr_chart_recognition,
+        paddleocr_layout_detection=options.paddleocr_layout_detection,
+        paddleocr_formula_recognition=options.paddleocr_formula_recognition,
+        paddleocr_table_recognition=options.paddleocr_table_recognition,
+        paddleocr_visualize=options.paddleocr_visualize,
         vision_batch_workers=_positive_worker_count(options.vision_workers, "Vision 并发数"),
         brain_batch_workers=_positive_worker_count(options.brain_workers, "Brain 并发数"),
     )
@@ -432,13 +755,14 @@ def selected_config_from_options(options: GuiRunOptions, base_config: AppConfig 
 
 def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = None) -> CostEstimateSummary:
     config = selected_config_from_options(options, base_config)
-    engine_mode = engine_mode_key(options.engine_mode)
+    engine_mode = workflow_engine_mode(options)
     rows: list[CostEstimateRow] = []
     source_kind = source_kind_key(options.source_kind)
-    note_parts = ["只估算 Vision/Brain 模型 token 费用，不含 MinerU 平台费用。"]
+    note_parts = ["只估算 Vision/Brain 模型 token 费用，不含 MinerU/PaddleOCR 平台费用。"]
 
-    if engine_mode == "mineru_only":
+    if engine_mode in {"mineru_only", "paddleocr_only"}:
         pages = _estimate_total_pages(options)
+        engine_label = "PaddleOCR" if engine_mode == "paddleocr_only" else "MinerU"
         return CostEstimateSummary(
             rows=[],
             total_pages=pages,
@@ -446,10 +770,10 @@ def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = No
             total_output_tokens=0,
             total_cost=0.0,
             confidence="高",
-            note="仅 MinerU 模式不会调用 Vision/Brain；这里只显示模型精修成本为 ¥0，不含 MinerU 平台费用。",
+            note=f"仅 {engine_label} 模式不会调用 Vision/Brain；这里只显示模型精修成本为 ¥0，不含平台额度/限制。",
         )
 
-    if source_kind == "mineru_artifact_dir":
+    if source_kind in {"mineru_artifact_dir", "paddleocr_artifact_dir"}:
         rows = [_estimate_artifact_cost_row(Path(options.source_value.strip().strip('"')), options, config)]
         note_parts.append("artifact 已存在，可按实际页数、裁剪块和图片尺寸估算，仍不含模型输出长度波动。")
     elif source_kind in {"input_file", "input_files", "input_folder"}:
@@ -458,10 +782,10 @@ def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = No
             rows.append(_estimate_path_cost_row(path, options, config))
         if not rows:
             rows = [CostEstimateRow("待选择文件", None, None, 0, 0, None, "低", "还没有可估算的本地文件。")]
-        note_parts.append("本地文件在 MinerU 返回裁剪块前只能按页数和经验 crop 数粗估。")
+        note_parts.append("本地文件在解析引擎返回裁剪块前只能按页数和经验 crop 数粗估。")
     else:
         rows = [CostEstimateRow("远程 URL", None, None, 0, 0, None, "低", "远程文件运行前无法读取页数。")]
-        note_parts.append("远程 URL 运行前无法读取页数，等 MinerU 返回后进度会按真实页数更新。")
+        note_parts.append("远程 URL 运行前无法读取页数，等解析引擎返回后进度会按真实页数更新。")
 
     known_pages = [row.pages for row in rows if row.pages is not None]
     total_pages = sum(known_pages) if len(known_pages) == len(rows) else None
@@ -516,8 +840,14 @@ def _estimate_path_cost_row(path: Path, options: GuiRunOptions, config: AppConfi
 
 def _estimate_artifact_cost_row(path: Path, options: GuiRunOptions, config: AppConfig) -> CostEstimateRow:
     try:
-        artifacts = discover_mineru_artifacts(path)
-        document_ir = adapt_mineru_artifacts(artifacts, source_path=None, engine_mode=engine_mode_key(options.engine_mode))
+        if source_kind_key(options.source_kind) == "paddleocr_artifact_dir":
+            artifacts = discover_paddleocr_artifacts(path)
+            document_ir = adapt_paddleocr_artifacts(artifacts, source_path=None, engine_mode=workflow_engine_mode(options))
+            image_resolver = resolve_paddleocr_artifact_image
+        else:
+            artifacts = discover_mineru_artifacts(path)
+            document_ir = adapt_mineru_artifacts(artifacts, source_path=None, engine_mode=workflow_engine_mode(options))
+            image_resolver = resolve_artifact_image
     except Exception as exc:
         return CostEstimateRow(path.name, None, None, 0, 0, None, "低", f"无法读取 artifact：{exc}")
     pages = document_ir.get("pages") or []
@@ -531,7 +861,7 @@ def _estimate_artifact_cost_row(path: Path, options: GuiRunOptions, config: AppC
         for block in page.get("blocks") or []:
             if block.get("type") not in VISION_COST_BLOCK_TYPES:
                 continue
-            image_path = resolve_artifact_image(
+            image_path = image_resolver(
                 artifacts,
                 block.get("crop_ref") or block.get("image_path") or block.get("path") or block.get("image_ref"),
             )
@@ -710,13 +1040,81 @@ class GuiProgressTracker:
 
         if (
             "Submitting local files to MinerU" in message
+            or "Submitting one local file to MinerU" in message
             or "Uploading file to MinerU" in message
+            or "MinerU chunked PDF start" in message
+            or "MinerU chunk " in message and " submit:" in message
             or "正在上传本地文件到 MinerU" in message
             or "正在上传文件" in message
+            or "正在提交 MinerU 分段" in message
+            or "开始 MinerU 自动分段" in message
         ):
             self.stage = "上传到 MinerU"
             self.detail = _compact_message(message)
-        elif "MinerU batch submitted" in message or "MinerU 批量任务已提交" in message:
+        elif (
+            "Submitting remote URL to PaddleOCR" in message
+            or "Submitting local file to PaddleOCR" in message
+            or "Submitting one local file to PaddleOCR" in message
+            or "PaddleOCR submit local file" in message
+            or "PaddleOCR submit URL" in message
+            or "正在提交远程 URL 到 PaddleOCR" in message
+            or "正在提交本地文件到 PaddleOCR" in message
+            or "正在提交单个本地文件到 PaddleOCR" in message
+            or "PaddleOCR 正在上传文件" in message
+            or "PaddleOCR 正在提交 URL" in message
+        ):
+            self._begin_document(message)
+            self.stage = "提交到 PaddleOCR"
+            self.detail = _compact_message(message)
+        elif (
+            "PaddleOCR task submitted" in message
+            or "PaddleOCR chunk submitted" in message
+            or "PaddleOCR 任务已提交" in message
+        ):
+            self.stage = "等待 PaddleOCR 排队"
+            self.detail = _compact_message(message)
+        elif "PaddleOCR job pending" in message or "等待 PaddleOCR 排队" in message:
+            self.stage = "等待 PaddleOCR 排队"
+            self.detail = _compact_message(message)
+        elif match := (PADDLEOCR_RUNNING_RE.search(message) or ZH_PADDLEOCR_RUNNING_RE.search(message)):
+            if not self.current_doc_started:
+                self._begin_document(message)
+            extracted = int(match.group(2))
+            total = int(match.group(3))
+            self._set_current_total_pages(total)
+            self._set_current_done_pages(extracted)
+            self.stage = f"PaddleOCR 解析 {extracted}/{total} 页"
+            self.detail = f"job_id={match.group(1)}"
+        elif "PaddleOCR job running" in message or "等待 PaddleOCR 解析" in message:
+            self.stage = "等待 PaddleOCR 解析"
+            self.detail = _compact_message(message)
+        elif "PaddleOCR job done" in message or "PaddleOCR 解析完成" in message:
+            self.stage = "下载 PaddleOCR 结果"
+            self.detail = _compact_message(message)
+        elif (
+            "PaddleOCR downloading JSONL result" in message
+            or "PaddleOCR downloading Markdown result" in message
+            or "正在下载 PaddleOCR JSONL 结果" in message
+            or "正在下载 PaddleOCR Markdown 结果" in message
+            or "Downloading PaddleOCR artifact" in message
+        ):
+            self.stage = "下载 PaddleOCR 结果"
+            self.detail = _compact_message(message)
+        elif "Processing PaddleOCR artifact into Markdown" in message or "正在处理已有 PaddleOCR artifact" in message:
+            if not self.current_doc_started:
+                self._begin_document(message)
+            self.stage = "解析 PaddleOCR artifact"
+            self.detail = _compact_message(message)
+        elif "PaddleOCR chunked PDF start" in message or "开始 PaddleOCR 自动分段" in message:
+            self.stage = "PaddleOCR 自动分段"
+            self.detail = _compact_message(message)
+        elif "PaddleOCR chunk " in message and " submit:" in message or "正在提交 PaddleOCR 分段" in message:
+            self.stage = "提交 PaddleOCR 分段"
+            self.detail = _compact_message(message)
+        elif "PaddleOCR mixed local processing start" in message or "开始处理 PaddleOCR 本地文件" in message:
+            self.stage = "PaddleOCR 批量处理"
+            self.detail = _compact_message(message)
+        elif "MinerU batch submitted" in message or "MinerU 批量任务已提交" in message or "MinerU 分段任务已提交" in message:
             match = MINERU_BATCH_SUBMITTED_RE.search(message) or ZH_MINERU_BATCH_SUBMITTED_RE.search(message)
             if match:
                 self.files_total = max(self.files_total, int(match.group(1)))
@@ -727,6 +1125,7 @@ class GuiProgressTracker:
             or "Query MinerU batch" in message
             or "等待 MinerU 解析" in message
             or "正在查询 MinerU" in message
+            or "MinerU chunk batch submitted" in message
         ):
             self.stage = "等待 MinerU 解析"
             self.detail = _compact_message(message)
@@ -754,6 +1153,13 @@ class GuiProgressTracker:
             pages = int(match.group(1))
             self._set_current_total_pages(pages)
             self.stage = "DocumentIR 已就绪"
+            self.detail = self._document_detail()
+        elif match := (PADDLEOCR_DOCUMENT_READY_RE.search(message) or ZH_PADDLEOCR_DOCUMENT_READY_RE.search(message)):
+            if not self.current_doc_started:
+                self._begin_document(message)
+            pages = int(match.group(1))
+            self._set_current_total_pages(pages)
+            self.stage = "PaddleOCR DocumentIR 已就绪"
             self.detail = self._document_detail()
         elif "Hybrid enrichment start" in message or "开始混合精修" in message:
             self.stage = "Hybrid 精修"
@@ -793,6 +1199,20 @@ class GuiProgressTracker:
                 self._complete_page(slide, elapsed)
             self.stage = f"渲染第 {slide} 页"
             self.detail = f"Markdown status={status}"
+        elif match := (PADDLEOCR_RENDERING_PAGE_RE.search(message) or ZH_PADDLEOCR_RENDERING_PAGE_RE.search(message)):
+            page = int(match.group(1))
+            total = int(match.group(2))
+            self._set_current_total_pages(total)
+            self.current_page = page
+            self.page_started_elapsed[page] = elapsed
+            self.stage = f"PaddleOCR 渲染第 {page}/{total} 页"
+            self.detail = f"slide={match.group(3)}"
+        elif match := (PADDLEOCR_PAGE_RENDERED_RE.search(message) or ZH_PADDLEOCR_PAGE_RENDERED_RE.search(message)):
+            slide = int(match.group(1))
+            status = match.group(2)
+            self._complete_page(slide, elapsed)
+            self.stage = f"PaddleOCR 第 {slide} 页完成"
+            self.detail = f"Markdown status={status}"
         elif "Merging per-page Markdown" in message or "正在合并每页 Markdown" in message:
             self.stage = "合并 Markdown"
             self.detail = self._document_detail()
@@ -807,7 +1227,24 @@ class GuiProgressTracker:
             self._finish_document()
             self.stage = "文件处理完成"
             self.detail = f"{self.completed_files}/{self.files_total} 个文件完成"
+        elif match := re.search(r"PaddleOCR 文件处理完成：共\s*(\d+)\s*页，输出目录=(.+)", message):
+            pages = int(match.group(1))
+            self._set_current_total_pages(pages)
+            self._finish_document()
+            self.stage = "PaddleOCR 文件处理完成"
+            self.detail = f"{self.completed_files}/{self.files_total} 个文件完成"
+        elif match := re.search(r"PaddleOCR (?:API|artifact) processed: (\d+) pages -> (.+)", message):
+            pages = int(match.group(1))
+            self._set_current_total_pages(pages)
+            self._finish_document()
+            self.stage = "PaddleOCR 文件处理完成"
+            self.detail = f"{self.completed_files}/{self.files_total} 个文件完成"
         elif message.startswith("MinerU batch complete:") or message.startswith("MinerU 批量任务完成："):
+            self.completed_files = self.files_total
+            self.done = True
+            self.stage = "全部完成"
+            self.detail = message
+        elif message.startswith("PaddleOCR local batch complete:") or message.startswith("PaddleOCR 本地任务完成："):
             self.completed_files = self.files_total
             self.done = True
             self.stage = "全部完成"
@@ -891,6 +1328,15 @@ class GuiProgressTracker:
         self.completed_pages.add(page)
         self.current_pages_done = len(self.completed_pages)
         self.current_page = max(self.current_page, page)
+
+    def _set_current_done_pages(self, pages_done: int) -> None:
+        if pages_done < 0:
+            return
+        total = self.current_pages_total or pages_done
+        capped = min(pages_done, total)
+        self.completed_pages.update(range(1, capped + 1))
+        self.current_pages_done = max(self.current_pages_done, capped)
+        self.current_page = max(self.current_page, capped)
 
     def _finish_document(self) -> None:
         if not self.current_doc_started:
@@ -1057,13 +1503,15 @@ class DocPage2MdGui:
         self.ttk = ttk
         self.root = tk.Tk()
         self.root.title("DocPage2MD 工作台")
-        self.root.geometry("1240x900")
-        self.root.minsize(1040, 760)
+        self.root.geometry("1360x900")
+        self.root.minsize(1120, 760)
 
         self.repo_root = Path(__file__).resolve().parent.parent
         self.base_config = AppConfig(output_folder=str((self.repo_root / "markdown_output").resolve()))
         self.catalog = ModelCatalogView(self.base_config)
         self._tree_item_data: dict[str, dict] = {}
+        self.input_files: list[Path] = []
+        self._syncing_input = False
         self.output_queue: queue.Queue[tuple[str, str | int]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
         self.reader_thread: threading.Thread | None = None
@@ -1076,6 +1524,8 @@ class DocPage2MdGui:
         default_vision, default_brain = default_model_selection("balanced", self.base_config)
         self.document_type = tk.StringVar(value=DOCUMENT_PRESETS["handwritten_notes"][0])
         self.engine_mode = tk.StringVar(value=ENGINE_MODE_LABELS["hybrid"])
+        self.layout_engine = tk.StringVar(value=LAYOUT_ENGINE_LABELS["mineru"])
+        self.refine_mode = tk.StringVar(value=REFINE_MODE_LABELS["docpage2md"])
         self.model_profile = tk.StringVar(value=MODEL_PROFILE_LABELS["balanced"])
         self.source_kind = tk.StringVar(value=SOURCE_LABELS["input_files"])
         self.source_value = tk.StringVar(value="")
@@ -1083,6 +1533,25 @@ class DocPage2MdGui:
         self.session_name = tk.StringVar(value="")
         self.page_ranges = tk.StringVar(value="")
         self.mineru_model_version = tk.StringVar(value="vlm")
+        self.mineru_is_ocr = tk.BooleanVar(value=self.base_config.mineru_is_ocr)
+        self.mineru_enable_formula = tk.BooleanVar(value=self.base_config.mineru_enable_formula)
+        self.mineru_enable_table = tk.BooleanVar(value=self.base_config.mineru_enable_table)
+        self.mineru_language = tk.StringVar(value=self.base_config.mineru_language)
+        self.mineru_auto_split_pages = tk.BooleanVar(value=True)
+        self.mineru_page_chunk_size = tk.StringVar(value=str(self.base_config.mineru_page_chunk_size))
+        self.paddleocr_model = tk.StringVar(value=self.base_config.paddleocr_model)
+        self.paddleocr_api_key_env = tk.StringVar(value=self.base_config.paddleocr_api_key_env)
+        self.paddleocr_base_url = tk.StringVar(value=self.base_config.paddleocr_base_url)
+        self.paddleocr_page_chunk_size = tk.StringVar(value=str(self.base_config.paddleocr_page_chunk_size))
+        self.paddleocr_doc_orientation = tk.BooleanVar(value=self.base_config.paddleocr_doc_orientation)
+        self.paddleocr_doc_unwarping = tk.BooleanVar(value=self.base_config.paddleocr_doc_unwarping)
+        self.paddleocr_chart_recognition = tk.BooleanVar(value=self.base_config.paddleocr_chart_recognition)
+        self.paddleocr_layout_detection = tk.BooleanVar(value=self.base_config.paddleocr_layout_detection)
+        self.paddleocr_formula_recognition = tk.BooleanVar(value=self.base_config.paddleocr_formula_recognition)
+        self.paddleocr_table_recognition = tk.BooleanVar(value=self.base_config.paddleocr_table_recognition)
+        self.paddleocr_visualize = tk.BooleanVar(value=self.base_config.paddleocr_visualize)
+        self.show_mineru_advanced = tk.BooleanVar(value=False)
+        self.show_paddleocr_advanced = tk.BooleanVar(value=False)
         self.recursive = tk.BooleanVar(value=False)
         self.vision_workers = tk.StringVar(value=str(self.base_config.vision_batch_workers))
         self.brain_workers = tk.StringVar(value=str(self.base_config.brain_batch_workers))
@@ -1103,7 +1572,15 @@ class DocPage2MdGui:
         self.command_preview = tk.StringVar(value="")
         self.run_summary_text = tk.StringVar(value="")
         self.cost_summary_text = tk.StringVar(value="成本估算：点击“刷新成本估算”后显示。")
+        self.input_summary_text = tk.StringVar(value="还没有选择输入文件。")
         self.model_summary_text = tk.StringVar(value="")
+        self.vision_filter = tk.StringVar(value="")
+        self.brain_filter = tk.StringVar(value="")
+        self.secret_store = tk.StringVar(value="local")
+        self.provider_kind = tk.StringVar(value="DashScope")
+        self.provider_base_url = tk.StringVar(value=self.base_config.openai_base_url)
+        self.provider_key_name = tk.StringVar(value="DASHSCOPE_API_KEY")
+        self.provider_status = tk.StringVar(value="选择 Provider 后可检查 Key 或验证模型。")
 
         self._configure_style()
         self._build_ui()
@@ -1151,97 +1628,197 @@ class DocPage2MdGui:
     def _build_run_tab(self, parent) -> None:
         tk = self.tk
         ttk = self.ttk
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(6, weight=1)
+        parent.columnconfigure(0, weight=0, minsize=540)
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(0, weight=1)
 
-        top = ttk.LabelFrame(parent, text="1. 任务预设", padding=10)
-        top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        top.columnconfigure(1, weight=1)
-        top.columnconfigure(3, weight=1)
+        left = ttk.Frame(parent)
+        right = ttk.Frame(parent)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        right.grid(row=0, column=1, sticky="nsew")
+        left.columnconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=1)
 
-        ttk.Label(top, text="文档类型").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        workflow = ttk.LabelFrame(left, text="工作流", padding=12)
+        workflow.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        workflow.columnconfigure(1, weight=1)
+
+        ttk.Label(workflow, text="文档类型").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Combobox(
-            top,
+            workflow,
             textvariable=self.document_type,
             values=[item[0] for item in DOCUMENT_PRESETS.values()],
             state="readonly",
         ).grid(row=0, column=1, sticky="ew", pady=4)
-        ttk.Label(top, text="处理模式").grid(row=0, column=2, sticky="w", padx=(14, 8), pady=4)
+        self._help_button(workflow, "document_type").grid(row=0, column=2, padx=(6, 0), pady=4)
+        ttk.Label(workflow, text="解析引擎").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Combobox(
-            top,
-            textvariable=self.engine_mode,
-            values=[ENGINE_MODE_LABELS["hybrid"], ENGINE_MODE_LABELS["mineru_only"]],
+            workflow,
+            textvariable=self.layout_engine,
+            values=[LAYOUT_ENGINE_LABELS["mineru"], LAYOUT_ENGINE_LABELS["paddleocr"]],
             state="readonly",
-        ).grid(row=0, column=3, sticky="ew", pady=4)
-        ttk.Label(top, text="模型档位").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ).grid(row=1, column=1, sticky="ew", pady=4)
+        self._help_button(workflow, "engine_mode").grid(row=1, column=2, padx=(6, 0), pady=4)
+        ttk.Label(workflow, text="Markdown 精修").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Combobox(
-            top,
+            workflow,
+            textvariable=self.refine_mode,
+            values=[REFINE_MODE_LABELS["docpage2md"], REFINE_MODE_LABELS["none"]],
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew", pady=4)
+        self._help_button(workflow, "engine_mode").grid(row=2, column=2, padx=(6, 0), pady=4)
+        ttk.Label(workflow, text="模型档位").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            workflow,
             textvariable=self.model_profile,
             values=[MODEL_PROFILE_LABELS[key] for key in ("cheap", "balanced", "accurate", "manual")],
             state="readonly",
-        ).grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Label(top, text="MinerU 模型").grid(row=1, column=2, sticky="w", padx=(14, 8), pady=4)
+        ).grid(row=3, column=1, sticky="ew", pady=4)
+        self._help_button(workflow, "model_profile").grid(row=3, column=2, padx=(6, 0), pady=4)
+        ttk.Label(workflow, text="MinerU 模型").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Combobox(
-            top,
+            workflow,
             textvariable=self.mineru_model_version,
             values=["vlm", "pipeline", "MinerU-HTML"],
             state="readonly",
-        ).grid(row=1, column=3, sticky="ew", pady=4)
+        ).grid(row=4, column=1, sticky="ew", pady=4)
+        self._help_button(workflow, "mineru_model").grid(row=4, column=2, padx=(6, 0), pady=4)
+        ttk.Label(workflow, text="PaddleOCR 模型").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            workflow,
+            textvariable=self.paddleocr_model,
+            values=["PaddleOCR-VL-1.6", "PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3", "PP-OCRv5"],
+            state="readonly",
+        ).grid(row=5, column=1, sticky="ew", pady=4)
+        self._help_button(workflow, "paddleocr").grid(row=5, column=2, padx=(6, 0), pady=4)
         ttk.Label(
-            top,
+            workflow,
             textvariable=self.run_summary_text,
-            wraplength=1080,
+            wraplength=460,
             justify="left",
-        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
 
-        source = ttk.LabelFrame(parent, text="2. 输入来源", padding=10)
+        source = ttk.LabelFrame(left, text="输入", padding=12)
         source.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        source.columnconfigure(1, weight=1)
-        ttk.Label(source, text="来源").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Combobox(source, textvariable=self.source_kind, values=list(SOURCE_LABELS.values()), state="readonly").grid(
+        source.columnconfigure(0, weight=1)
+        source.rowconfigure(3, weight=1)
+        source_top = ttk.Frame(source)
+        source_top.grid(row=0, column=0, sticky="ew")
+        source_top.columnconfigure(1, weight=1)
+        ttk.Label(source_top, text="来源").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(source_top, textvariable=self.source_kind, values=list(SOURCE_LABELS.values()), state="readonly").grid(
             row=0, column=1, sticky="ew", pady=4
         )
-        ttk.Button(source, text="选择文件/目录", command=self._browse_source).grid(row=0, column=2, padx=(8, 0), pady=4)
-        ttk.Entry(source, textvariable=self.source_value).grid(row=1, column=0, columnspan=3, sticky="ew", pady=4)
-        ttk.Checkbutton(source, text="文件夹输入时递归扫描子文件夹", variable=self.recursive).grid(
-            row=2, column=0, columnspan=3, sticky="w"
+        self._help_button(source_top, "input").grid(row=0, column=2, padx=(6, 0), pady=4)
+        toolbar = ttk.Frame(source)
+        toolbar.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        toolbar.columnconfigure(8, weight=1)
+        ttk.Button(toolbar, text="添加文件", command=self._add_input_files).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(toolbar, text="添加文件夹", command=self._add_input_folder).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(toolbar, text="浏览来源", command=self._browse_source).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(toolbar, text="删除", command=self._remove_selected_inputs).grid(row=0, column=3, padx=(0, 6))
+        ttk.Button(toolbar, text="清空", command=self._clear_inputs).grid(row=0, column=4, padx=(0, 6))
+        ttk.Button(toolbar, text="上移", command=lambda: self._move_selected_input(-1)).grid(row=0, column=5, padx=(0, 6))
+        ttk.Button(toolbar, text="下移", command=lambda: self._move_selected_input(1)).grid(row=0, column=6, padx=(0, 6))
+        ttk.Button(toolbar, text="预览", command=self._preview_selected_input).grid(row=0, column=7, padx=(0, 6))
+        columns = ("order", "name", "type", "size", "pages", "status")
+        self.input_tree = ttk.Treeview(source, columns=columns, show="headings", height=8)
+        for col, label, width in [
+            ("order", "#", 36),
+            ("name", "文件名", 150),
+            ("type", "类型", 58),
+            ("size", "大小", 76),
+            ("pages", "页数", 60),
+            ("status", "限制状态", 150),
+        ]:
+            self.input_tree.heading(col, text=label)
+            self.input_tree.column(col, width=width, anchor="w", stretch=col in {"name", "status"})
+        self.input_tree.grid(row=2, column=0, sticky="nsew")
+        input_scroll = ttk.Scrollbar(source, orient="vertical", command=self.input_tree.yview)
+        input_scroll.grid(row=2, column=1, sticky="ns")
+        self.input_tree.configure(yscrollcommand=input_scroll.set)
+        input_bottom = ttk.Frame(source)
+        input_bottom.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        input_bottom.columnconfigure(0, weight=1)
+        ttk.Label(input_bottom, textvariable=self.input_summary_text, wraplength=420).grid(row=0, column=0, sticky="w")
+        ttk.Button(input_bottom, text="打开文件", command=self._open_selected_input).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(input_bottom, text="打开目录", command=self._open_selected_input_folder).grid(row=0, column=2, padx=(6, 0))
+        ttk.Checkbutton(source, text="文件夹输入时递归扫描", variable=self.recursive).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
 
-        out = ttk.LabelFrame(parent, text="3. 输出、页码、并发", padding=10)
+        out = ttk.LabelFrame(left, text="输出与并发", padding=12)
         out.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         out.columnconfigure(1, weight=1)
-        out.columnconfigure(3, weight=1)
         ttk.Label(out, text="输出目录").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(out, textvariable=self.output_folder).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Button(out, text="选择", command=self._browse_output).grid(row=0, column=2, padx=(8, 0), pady=4)
         ttk.Label(out, text="任务名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(out, textvariable=self.session_name).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Entry(out, textvariable=self.session_name).grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
         ttk.Label(out, text="页码范围").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(out, textvariable=self.page_ranges).grid(row=2, column=1, sticky="ew", pady=4)
-        ttk.Label(out, text="空=全量，例如 1-10 或 2,4-6").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=4)
-        ttk.Label(out, text="Vision 并发").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(out, textvariable=self.vision_workers, width=10).grid(row=3, column=1, sticky="w", pady=4)
-        ttk.Label(out, text="Brain 并发").grid(row=3, column=2, sticky="w", padx=(8, 8), pady=4)
-        ttk.Entry(out, textvariable=self.brain_workers, width=10).grid(row=3, column=3, sticky="w", pady=4)
-        ttk.Label(out, text="默认 60/60，会对 MinerU 返回后的裁剪块和页面精修并行执行。").grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(4, 0)
+        ttk.Label(out, text="空=全量").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=4)
+        advanced_toggle = ttk.Frame(out)
+        advanced_toggle.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        advanced_toggle.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            advanced_toggle,
+            text="显示高级 MinerU 设置",
+            variable=self.show_mineru_advanced,
+            command=self._toggle_mineru_advanced,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(advanced_toggle, text="默认已开启 OCR、公式、表格、中文。").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._help_button(advanced_toggle, "mineru_advanced").grid(row=0, column=2, padx=(6, 0))
+        self.mineru_advanced_frame = ttk.Frame(out)
+        self.mineru_advanced_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(self.mineru_advanced_frame, text="OCR", variable=self.mineru_is_ocr).grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(self.mineru_advanced_frame, text="公式识别", variable=self.mineru_enable_formula).grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(self.mineru_advanced_frame, text="表格识别", variable=self.mineru_enable_table).grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Label(self.mineru_advanced_frame, text="语言").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(self.mineru_advanced_frame, textvariable=self.mineru_language, width=10).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(self.mineru_advanced_frame, text="超过单次页数限制时自动分段", variable=self.mineru_auto_split_pages).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=3
         )
+        ttk.Label(self.mineru_advanced_frame, text="每段页数").grid(row=2, column=2, sticky="e", padx=(8, 4), pady=3)
+        ttk.Entry(self.mineru_advanced_frame, textvariable=self.mineru_page_chunk_size, width=8).grid(row=2, column=3, sticky="w", pady=3)
 
-        command = ttk.LabelFrame(parent, text="4. 成本估算与命令预览", padding=10)
-        command.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        command.columnconfigure(0, weight=1)
-        ttk.Label(command, textvariable=self.cost_summary_text, wraplength=1080, justify="left").grid(
-            row=0, column=0, sticky="ew"
-        )
-        command_buttons = ttk.Frame(command)
-        command_buttons.grid(row=0, column=1, sticky="ne", padx=(8, 0))
-        ttk.Button(command_buttons, text="刷新成本估算", command=self._refresh_cost_estimate).grid(row=0, column=0)
-        ttk.Entry(command, textvariable=self.command_preview, state="readonly").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0)
-        )
+        paddle_toggle = ttk.Frame(out)
+        paddle_toggle.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        paddle_toggle.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            paddle_toggle,
+            text="显示高级 PaddleOCR 设置",
+            variable=self.show_paddleocr_advanced,
+            command=self._toggle_paddleocr_advanced,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(paddle_toggle, text="默认 100 页分段，开启版面/公式/表格识别。").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._help_button(paddle_toggle, "paddleocr").grid(row=0, column=2, padx=(6, 0))
+        self.paddleocr_advanced_frame = ttk.Frame(out)
+        ttk.Label(self.paddleocr_advanced_frame, text="Token 名").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(self.paddleocr_advanced_frame, textvariable=self.paddleocr_api_key_env, width=22).grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Label(self.paddleocr_advanced_frame, text="每段页数").grid(row=0, column=2, sticky="e", padx=(8, 4), pady=3)
+        ttk.Entry(self.paddleocr_advanced_frame, textvariable=self.paddleocr_page_chunk_size, width=8).grid(row=0, column=3, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="方向矫正", variable=self.paddleocr_doc_orientation).grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="扭曲矫正", variable=self.paddleocr_doc_unwarping).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="图表识别", variable=self.paddleocr_chart_recognition).grid(row=1, column=2, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="版面检测", variable=self.paddleocr_layout_detection).grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="公式识别", variable=self.paddleocr_formula_recognition).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="表格识别", variable=self.paddleocr_table_recognition).grid(row=2, column=2, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="保存可视化图", variable=self.paddleocr_visualize).grid(row=2, column=3, sticky="w", pady=3)
 
-        progress = ttk.LabelFrame(parent, text="5. 运行进度", padding=10)
-        progress.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(out, text="Vision 并发").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(out, textvariable=self.vision_workers, width=10).grid(row=7, column=1, sticky="w", pady=4)
+        ttk.Label(out, text="Brain 并发").grid(row=8, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(out, textvariable=self.brain_workers, width=10).grid(row=8, column=1, sticky="w", pady=4)
+        ttk.Label(out, text="默认 60/60；MinerU 返回后裁剪块和页面会并行精修。", wraplength=460).grid(
+            row=9, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
+        self._toggle_mineru_advanced()
+        self._toggle_paddleocr_advanced()
+
+        progress = ttk.LabelFrame(right, text="运行状态", padding=12)
+        progress.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         progress.columnconfigure(0, weight=1)
         ttk.Progressbar(progress, variable=self.progress_percent, maximum=100).grid(row=0, column=0, columnspan=4, sticky="ew")
         ttk.Label(progress, textvariable=self.progress_stage).grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -1251,24 +1828,54 @@ class DocPage2MdGui:
         ttk.Label(progress, textvariable=self.progress_percent_label).grid(row=1, column=3, sticky="e", padx=(8, 0), pady=(6, 0))
         ttk.Label(progress, textvariable=self.progress_detail).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        log_frame = ttk.LabelFrame(parent, text="运行日志", padding=10)
-        log_frame.grid(row=5, column=0, sticky="nsew", pady=(0, 10))
+        command = ttk.LabelFrame(right, text="成本与命令", padding=12)
+        command.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        command.columnconfigure(0, weight=1)
+        cost_header = ttk.Frame(command)
+        cost_header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        cost_header.columnconfigure(0, weight=1)
+        ttk.Label(cost_header, textvariable=self.cost_summary_text, wraplength=760, justify="left").grid(row=0, column=0, sticky="ew")
+        self._help_button(cost_header, "cost").grid(row=0, column=1, padx=(8, 0), sticky="ne")
+        ttk.Button(cost_header, text="刷新估算", command=self._refresh_cost_estimate).grid(row=0, column=2, sticky="ne", padx=(8, 0))
+        ttk.Button(cost_header, text="刷新官方模型/价格", command=self._refresh_official_models_and_prices).grid(
+            row=0, column=3, sticky="ne", padx=(8, 0)
+        )
+        cost_columns = ("file", "pages", "crops", "input", "output", "cost", "confidence")
+        self.cost_tree = ttk.Treeview(command, columns=cost_columns, show="headings", height=4)
+        for col, label, width in [
+            ("file", "文件", 190),
+            ("pages", "页数", 70),
+            ("crops", "裁剪块", 70),
+            ("input", "输入tokens", 94),
+            ("output", "输出tokens", 94),
+            ("cost", "费用", 74),
+            ("confidence", "可信度", 82),
+        ]:
+            self.cost_tree.heading(col, text=label)
+            self.cost_tree.column(col, width=width, anchor="w", stretch=col == "file")
+        self.cost_tree.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Entry(command, textvariable=self.command_preview, state="readonly").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+
+        log_frame = ttk.LabelFrame(right, text="运行日志", padding=12)
+        log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
         log_tools = ttk.Frame(log_frame)
         log_tools.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         log_tools.columnconfigure(0, weight=1)
-        ttk.Label(log_tools, text="GUI 显示中文进度；完整中文日志会写入输出目录的 process.log。").grid(row=0, column=0, sticky="w")
+        ttk.Label(log_tools, text="中文进度日志；完整日志写入输出目录 process.log。").grid(row=0, column=0, sticky="w")
         ttk.Button(log_tools, text="放大日志", command=self._open_log_window).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(log_tools, text="清空显示", command=self._clear_log).grid(row=0, column=2, padx=(8, 0))
-        self.log_text = tk.Text(log_frame, wrap="word", height=14, state="disabled", font=("Consolas", 10))
+        self.log_text = tk.Text(log_frame, wrap="word", height=18, state="disabled", font=("Consolas", 10))
         self.log_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scroll.grid(row=1, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
 
-        bottom = ttk.Frame(parent)
-        bottom.grid(row=6, column=0, sticky="ew")
+        bottom = ttk.Frame(right)
+        bottom.grid(row=3, column=0, sticky="ew")
         bottom.columnconfigure(0, weight=1)
         ttk.Label(bottom, textvariable=self.status_text).grid(row=0, column=0, sticky="w")
         self.run_button = ttk.Button(bottom, text="开始处理", command=self._start_process, style="Primary.TButton")
@@ -1280,18 +1887,39 @@ class DocPage2MdGui:
     def _build_model_tab(self, parent) -> None:
         ttk = self.ttk
         parent.columnconfigure(0, weight=1)
-        parent.columnconfigure(1, weight=1)
-        parent.rowconfigure(3, weight=1)
+        parent.rowconfigure(0, weight=1)
 
         self.vision_status = self.tk.StringVar(value="")
         self.brain_status = self.tk.StringVar(value="")
+        self.model_message = self.tk.StringVar(value="")
 
-        current = ttk.LabelFrame(parent, text="当前生效模型", padding=10)
-        current.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        notebook = ttk.Notebook(parent)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        provider_tab = ttk.Frame(notebook, padding=12)
+        current_tab = ttk.Frame(notebook, padding=12)
+        catalog_tab = ttk.Frame(notebook, padding=12)
+        third_party_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(provider_tab, text="Provider 与 Key")
+        notebook.add(current_tab, text="角色绑定")
+        notebook.add(catalog_tab, text="候选模型")
+        notebook.add(third_party_tab, text="第三方模型库")
+
+        provider_tab.columnconfigure(0, weight=1)
+        current_tab.columnconfigure(0, weight=1)
+        catalog_tab.columnconfigure(0, weight=1)
+        catalog_tab.columnconfigure(1, weight=1)
+        catalog_tab.rowconfigure(0, weight=1)
+        third_party_tab.columnconfigure(0, weight=1)
+
+        self._build_provider_tab(provider_tab)
+
+        current = ttk.LabelFrame(current_tab, text="当前运行会使用的模型", padding=12)
+        current.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         current.columnconfigure(0, weight=1)
         current.columnconfigure(1, weight=1)
-        vision_card = ttk.LabelFrame(current, text="Vision：图片、裁剪块、图表识别", padding=10)
-        brain_card = ttk.LabelFrame(current, text="Brain：页面结构精修、上下文修正", padding=10)
+        vision_card = ttk.LabelFrame(current, text="Vision：图片、裁剪块、图表识别", padding=12)
+        brain_card = ttk.LabelFrame(current, text="Brain：页面结构精修、上下文修正", padding=12)
         vision_card.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         brain_card.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         self._build_current_model_editor(
@@ -1320,21 +1948,323 @@ class DocPage2MdGui:
             justify="left",
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(controls, text="按当前档位重置", command=self._reset_models_from_profile).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(controls, text="检查 Key", command=self._refresh_model_status).grid(row=0, column=2, padx=(8, 0))
-        ttk.Button(controls, text="设置 Key", command=self._prompt_save_key).grid(row=0, column=3, padx=(8, 0))
-        ttk.Button(controls, text="保存为默认", command=self._save_selected_models).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(controls, text="检查 Key", command=self._check_bound_keys).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(controls, text="验证模型", command=self._verify_bound_models).grid(row=0, column=3, padx=(8, 0))
+        ttk.Button(controls, text="设置 Key", command=self._prompt_save_key).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(controls, text="保存为默认", command=self._save_selected_models).grid(row=0, column=5, padx=(8, 0))
+        ttk.Label(current_tab, textvariable=self.model_message, wraplength=1100).grid(row=1, column=0, sticky="ew")
 
-        vision_box = ttk.LabelFrame(parent, text="官方/第三方 Vision 候选", padding=10)
-        brain_box = ttk.LabelFrame(parent, text="官方/第三方 Brain 候选", padding=10)
-        vision_box.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
-        brain_box.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
-        self.vision_list = self._build_model_list(vision_box, ROLE_VISION)
-        self.brain_list = self._build_model_list(brain_box, ROLE_BRAIN)
+        vision_box = ttk.LabelFrame(catalog_tab, text="Vision 候选", padding=12)
+        brain_box = ttk.LabelFrame(catalog_tab, text="Brain 候选", padding=12)
+        vision_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        brain_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.vision_list = self._build_model_list(vision_box, ROLE_VISION, self.vision_filter)
+        self.brain_list = self._build_model_list(brain_box, ROLE_BRAIN, self.brain_filter)
+        ttk.Label(catalog_tab, textvariable=self.model_message, wraplength=1100).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0)
+        )
 
-        editor = ttk.LabelFrame(parent, text="第三方模型管理", padding=10)
-        editor.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-        for i in range(7):
-            editor.columnconfigure(i, weight=1 if i in (1, 3, 5) else 0)
+        self._build_third_party_editor(third_party_tab)
+
+    def _build_provider_tab(self, parent) -> None:
+        ttk = self.ttk
+        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+
+        editor = ttk.LabelFrame(parent, text="Provider 配置", padding=12)
+        editor.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        editor.columnconfigure(1, weight=1)
+        editor.columnconfigure(3, weight=1)
+
+        ttk.Label(editor, text="Provider").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        provider_combo = ttk.Combobox(editor, textvariable=self.provider_kind, values=list(PROVIDER_PRESETS), state="readonly")
+        provider_combo.grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Label(editor, text="Key 保存").grid(row=0, column=2, sticky="w", padx=(10, 6), pady=4)
+        stores = ["local", "env"]
+        if os.name == "nt":
+            stores.append("credential")
+        ttk.Combobox(editor, textvariable=self.secret_store, values=stores, state="readonly").grid(row=0, column=3, sticky="ew", pady=4)
+
+        ttk.Label(editor, text="Base URL").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.provider_base_url).grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(editor, text="Key 名称").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.provider_key_name).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Button(editor, text="检查 Key", command=self._check_provider_key).grid(row=2, column=2, padx=(10, 0), pady=4)
+        ttk.Button(editor, text="验证模型", command=self._verify_provider_model).grid(row=2, column=3, padx=(8, 0), pady=4, sticky="w")
+
+        actions = ttk.Frame(editor)
+        actions.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        actions.columnconfigure(0, weight=1)
+        ttk.Label(actions, textvariable=self.provider_status, wraplength=760).grid(row=0, column=0, sticky="w")
+        ttk.Button(actions, text="保存 Key", command=self._prompt_save_provider_key).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="获取 API Key", command=self._open_provider_key_url).grid(row=0, column=2, padx=(8, 0))
+
+        table_frame = ttk.LabelFrame(parent, text="常用 Provider", padding=12)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        columns = ("provider", "base", "key", "status", "note")
+        self.provider_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
+        for col, label, width in [
+            ("provider", "Provider", 140),
+            ("base", "Base URL", 300),
+            ("key", "Key 名称", 170),
+            ("status", "Key 状态", 120),
+            ("note", "说明", 300),
+        ]:
+            self.provider_tree.heading(col, text=label)
+            self.provider_tree.column(col, width=width, anchor="w", stretch=col in {"base", "note"})
+        self.provider_tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.provider_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.provider_tree.configure(yscrollcommand=scroll.set)
+        self.provider_tree.bind("<<TreeviewSelect>>", lambda _event: self._load_provider_from_tree())
+        provider_combo.bind("<<ComboboxSelected>>", lambda _event: self._load_provider_preset())
+        self._populate_provider_tree()
+
+    def _help_button(self, parent, topic: str):
+        return self.ttk.Button(parent, text="?", width=3, command=lambda: self._show_help(topic))
+
+    def _show_help(self, topic: str) -> None:
+        from tkinter import messagebox
+
+        help_texts = {
+            "document_type": (
+                "文档类型只负责填推荐值，不会和处理模式、模型档位冲突。\n\n"
+                "手写矢量笔记：推荐 hybrid + balanced + MinerU vlm。\n"
+                "论文 PDF：清晰电子版可用 mineru_only；需要图表公式精修可改 hybrid。\n"
+                "截图/屏拍小题：当前 GUI 仍走 MinerU/hybrid 主路径；旧 vision_only 保留在 CLI。\n"
+                "复杂公式图表 PPT：推荐 hybrid，可考虑高精度档位。\n"
+                "自定义：不按预设自动推荐。"
+            ),
+            "engine_mode": (
+                "工作流由两层组成：解析引擎 + Markdown 精修。\n\n"
+                "MinerU：默认解析引擎，适合 PDF/Office/图片/HTML，vlm 默认适合手写和复杂版面。\n"
+                "PaddleOCR：正式可选解析引擎，适合扫描、屏拍、弯曲、复杂光照、公式表格等场景；默认 PaddleOCR-VL-1.6。\n\n"
+                "开启 DocPage2MD 精修：解析后再并行调用 Vision/Brain 修公式、图示、表格和页面结构，会产生 Vision/Brain token 费用。\n"
+                "关闭精修：只使用解析引擎结果，不调用 Vision/Brain，速度更快，模型费用为 0。"
+            ),
+            "model_profile": (
+                "模型档位说明：\n\n"
+                "省钱：更便宜，适合清晰材料或大批量粗转。\n"
+                "均衡：默认推荐，Vision=qwen3-vl-plus，Brain=deepseek-v4-flash。\n"
+                "高精度：适合复杂公式、图表和难页，成本和耗时更高。\n"
+                "自定义：使用模型管理页手动绑定的 Vision/Brain。"
+            ),
+            "mineru_model": (
+                "MinerU 模型版本是 MinerU 精准解析 API 的 model_version，不是 Vision/Brain 模型。\n\n"
+                "vlm：默认推荐。适合手写、扫描、复杂公式、图表、复杂版面。\n"
+                "pipeline：适合清晰电子 PDF 或论文，通常更快、更稳。\n"
+                "MinerU-HTML：只用于 .html/.htm。HTML 会自动切到它，非 HTML 不允许使用它。"
+            ),
+            "mineru_advanced": (
+                "高级 MinerU 设置默认按最佳方案开启：\n"
+                "is_ocr=true、enable_formula=true、enable_table=true、language=ch。\n\n"
+                "这些参数不增加本项目的 Vision/Brain token 成本。MinerU 本身按平台额度/限制管理。\n"
+                "本地 PDF 超过单次页数限制时，程序会按页码拆成多段提交并合并最终 Markdown。"
+            ),
+            "input": (
+                "输入区说明：\n\n"
+                "添加文件：可多选 PDF/Office/图片/HTML。\n"
+                "添加文件夹：扫描文件夹内支持的文档；可勾选递归。\n"
+                "页数：PDF 优先读取真实页数；缺依赖时用轻量 marker 估算。\n"
+                "限制状态：提示 MinerU/PaddleOCR 是否需要自动分段，以及 PaddleOCR 50MB 本地上传、100 页建议分段、每日 3000 页/模型额度风险。"
+            ),
+            "paddleocr": (
+                "PaddleOCR 设置说明：\n\n"
+                "默认模型 PaddleOCR-VL-1.6。它会通过异步 API 返回每页 Markdown、layout JSON 和图片资源。\n"
+                "本地上传文件限制 50MB，URL 文件限制约 200MB；每个模型每日约 3000 页额度。\n"
+                "为避免超过 100 页只解析前 100 页，GUI/CLI 默认按 100 页拆分 PDF 并自动合并输出。\n\n"
+                "高级开关会写入 optionalPayload。默认开启版面、公式、表格识别；方向/扭曲/图表识别默认关闭，遇到屏拍、倾斜或图表文档可手动开启。"
+            ),
+            "cost": (
+                "成本估算只估 Vision/Brain 模型费用。\n\n"
+                "MinerU：不计入人民币费用，只提示页数/平台限制。\n"
+                "PaddleOCR：按额度/限制显示，不计入模型 token 成本。\n\n"
+                "可信度：\n"
+                "高=已有 artifact，可按真实 crop 和 prompt 估算。\n"
+                "中=本地 PDF/图片，可读页数/尺寸，但不知道 MinerU 真实 crop。\n"
+                "低=URL、Office 或页数未知。"
+            ),
+        }
+        messagebox.showinfo("说明", help_texts.get(topic, "暂无说明。"))
+
+    def _toggle_mineru_advanced(self) -> None:
+        if self.show_mineru_advanced.get():
+            self.mineru_advanced_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        else:
+            self.mineru_advanced_frame.grid_remove()
+
+    def _toggle_paddleocr_advanced(self) -> None:
+        if self.show_paddleocr_advanced.get():
+            self.paddleocr_advanced_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        else:
+            self.paddleocr_advanced_frame.grid_remove()
+
+    def _populate_provider_tree(self) -> None:
+        if not hasattr(self, "provider_tree"):
+            return
+        for item_id in self.provider_tree.get_children():
+            self.provider_tree.delete(item_id)
+        notes = {
+            "MinerU": "文档解析，按平台额度/页数限制。",
+            "PaddleOCR": (
+                f"文档解析主路径；本地 {format_file_size(PADDLEOCR_LOCAL_FILE_LIMIT_BYTES)}，"
+                f"建议每段 {PADDLEOCR_RECOMMENDED_CHUNK_PAGES} 页，约 {PADDLEOCR_DAILY_PAGE_LIMIT_PER_MODEL} 页/日/模型。"
+            ),
+            "DashScope": "主要用于 Vision，也可用于 OpenAI-compatible 文本模型。",
+            "DeepSeek": "默认 Brain 精修模型。",
+            "OpenAI-compatible": "OpenRouter、One API、LiteLLM、自建转发等。",
+        }
+        for name, preset in PROVIDER_PRESETS.items():
+            ok, where = check_secret_exists(preset["api_key_env"], repo_root=self.repo_root)
+            self.provider_tree.insert(
+                "",
+                "end",
+                iid=name,
+                values=(
+                    name,
+                    preset["base_url"],
+                    preset["api_key_env"],
+                    "已设置" if ok else "未设置",
+                    f"{notes.get(name, '')} Key来源：{where}",
+                ),
+            )
+
+    def _load_provider_preset(self) -> None:
+        preset = PROVIDER_PRESETS.get(self.provider_kind.get())
+        if not preset:
+            return
+        self.provider_base_url.set(preset["base_url"])
+        self.provider_key_name.set(preset["api_key_env"])
+        self.provider_status.set(f"已载入 {self.provider_kind.get()}。")
+
+    def _load_provider_from_tree(self) -> None:
+        selected = self.provider_tree.selection()
+        if not selected:
+            return
+        self.provider_kind.set(selected[0])
+        self._load_provider_preset()
+
+    def _check_provider_key(self) -> None:
+        env_name = self.provider_key_name.get().strip()
+        if not env_name:
+            self.provider_status.set("请先填写 Key 名称。")
+            return
+        ok, where = check_secret_exists(env_name, repo_root=self.repo_root)
+        self.provider_status.set(f"{env_name}: {'已找到' if ok else '未找到'}（{where}）。检查 Key 不联网。")
+        self._populate_provider_tree()
+        self._refresh_model_status()
+
+    def _prompt_save_provider_key(self) -> None:
+        from tkinter import simpledialog
+
+        env_name = self.provider_key_name.get().strip()
+        if not env_name:
+            self.provider_status.set("请先填写 Key 名称。")
+            return
+        key_value = simpledialog.askstring("保存 API Key", f"粘贴 {env_name} 的值（不会写入 Git）:", show="*")
+        if not key_value:
+            return
+        ok = set_secret_value(env_name, key_value, store=self.secret_store.get(), repo_root=self.repo_root)
+        self.provider_status.set(
+            f"{env_name}: {'已保存' if ok else '保存失败'}，位置={self.secret_store.get()}。日志和报告只记录 Key 名称。"
+        )
+        self._populate_provider_tree()
+        self._refresh_model_status()
+
+    def _open_provider_key_url(self) -> None:
+        import webbrowser
+
+        preset = PROVIDER_PRESETS.get(self.provider_kind.get()) or {}
+        url = preset.get("help_url") or ""
+        if not url:
+            self.provider_status.set("OpenAI-compatible Provider 请到对应服务商后台获取 Key。")
+            return
+        webbrowser.open(url)
+
+    def _verify_provider_model(self) -> None:
+        provider_name = self.provider_kind.get()
+        env_name = self.provider_key_name.get().strip()
+        api_key = get_env_value(env_name)
+        if not api_key:
+            self.provider_status.set(f"未检测到 {env_name}，请先保存或设置 Key。")
+            return
+        if provider_name in {"MinerU", "PaddleOCR"}:
+            self.provider_status.set(f"{provider_name} Key 已读取。解析 API 联网验证会在正式任务中完成。")
+            return
+        model = self.vision_model.get() if provider_name != "DeepSeek" else self.brain_model.get()
+        base_url = self.provider_base_url.get().strip()
+        try:
+            status, error = verify_openai_chat_model(model, api_key, base_url, is_vision=provider_name != "DeepSeek")
+        except Exception as exc:
+            self.provider_status.set(f"验证失败：{exc}")
+            return
+        self.provider_status.set(f"验证结果：{model} -> {status} {(error or '')[:160]}")
+
+    def _check_bound_keys(self) -> None:
+        self._refresh_model_status()
+        messages = []
+        layout = layout_engine_key(self.layout_engine.get())
+        if layout == "mineru":
+            parser_keys = [("解析引擎", "MINERU_API_TOKEN")]
+        elif layout == "paddleocr":
+            parser_keys = [("解析引擎", self.paddleocr_api_key_env.get())]
+        else:
+            parser_keys = []
+        for label, env_name in parser_keys:
+            ok, where = check_secret_exists(env_name, repo_root=self.repo_root)
+            messages.append(f"{label}: {env_name} {'已找到' if ok else '未找到'}（{where}）")
+        for label, env_name in (("Vision", self.vision_api_key_env.get()), ("Brain", self.brain_api_key_env.get())):
+            ok, where = check_secret_exists(env_name, repo_root=self.repo_root)
+            messages.append(f"{label}: {env_name} {'已找到' if ok else '未找到'}（{where}）")
+        self.model_message.set("；".join(messages) + "。检查 Key 不联网。")
+
+    def _verify_bound_models(self) -> None:
+        results = []
+        for label, provider, model, base_url, env_name, is_vision in (
+            ("Vision", self.vision_provider.get(), self.vision_model.get(), self.vision_base_url.get(), self.vision_api_key_env.get(), True),
+            ("Brain", self.brain_provider.get(), self.brain_model.get(), self.brain_base_url.get(), self.brain_api_key_env.get(), False),
+        ):
+            api_key = get_env_value(env_name)
+            if not api_key:
+                results.append(f"{label}: 未检测到 {env_name}")
+                continue
+            try:
+                status, error = verify_openai_chat_model(model, api_key, base_url, is_vision=is_vision)
+            except Exception as exc:
+                results.append(f"{label}: 验证失败 {exc}")
+                continue
+            results.append(f"{label}: {provider}:{model} -> {status}{(' ' + error[:80]) if error else ''}")
+        self.model_message.set("；".join(results))
+
+    def _refresh_official_models_and_prices(self) -> None:
+        self.cost_summary_text.set("正在后台刷新官方模型/价格，请稍候...")
+
+        def worker() -> None:
+            try:
+                from .official_catalog import refresh_official_catalog
+
+                result = refresh_official_catalog(
+                    providers=["dashscope", "deepseek", "openai-compatible"],
+                    cache_path=self.base_config.model_cache_path,
+                    region=self.base_config.region,
+                    base_url=self.base_config.openai_base_url,
+                )
+                self.output_queue.put(("catalog", result.summary_text() + "\n" + _catalog_diff_brief(result.diff, result.errors)))
+            except Exception as exc:
+                self.output_queue.put(("catalog", f"刷新官方模型/价格失败，继续使用本地价格表：{exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_third_party_editor(self, parent) -> None:
+        ttk = self.ttk
+        parent.columnconfigure(0, weight=1)
+
+        editor = ttk.LabelFrame(parent, text="第三方模型资料", padding=12)
+        editor.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        editor.columnconfigure(1, weight=1)
+        editor.columnconfigure(3, weight=1)
         self.third_party_id = self.tk.StringVar(value="")
         self.tp_name = self.tk.StringVar(value="")
         self.tp_provider = self.tk.StringVar(value="openai_compatible")
@@ -1348,31 +2278,42 @@ class DocPage2MdGui:
         ttk.Label(editor, text="名称").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
         ttk.Entry(editor, textvariable=self.tp_name).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Label(editor, text="提供商").grid(row=0, column=2, sticky="w", padx=(8, 6), pady=4)
-        ttk.Combobox(editor, textvariable=self.tp_provider, values=SUPPORTED_PROVIDERS, state="readonly").grid(row=0, column=3, sticky="ew", pady=4)
-        ttk.Label(editor, text="模型 ID").grid(row=0, column=4, sticky="w", padx=(8, 6), pady=4)
-        ttk.Entry(editor, textvariable=self.tp_model).grid(row=0, column=5, sticky="ew", pady=4)
-        ttk.Label(editor, text="Base URL").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
-        ttk.Entry(editor, textvariable=self.tp_base_url).grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
-        ttk.Label(editor, text="Key 环境变量").grid(row=1, column=4, sticky="w", padx=(8, 6), pady=4)
-        ttk.Entry(editor, textvariable=self.tp_api_key_env).grid(row=1, column=5, sticky="ew", pady=4)
-        ttk.Label(editor, text="角色").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
-        ttk.Combobox(editor, textvariable=self.tp_roles, values=["vision", "brain", "both"], state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
-        ttk.Checkbutton(editor, text="支持图片输入", variable=self.tp_supports_vision).grid(row=2, column=2, sticky="w", pady=4)
-        ttk.Label(editor, text="输入价 元/M").grid(row=2, column=3, sticky="w", padx=(8, 6), pady=4)
-        ttk.Entry(editor, textvariable=self.tp_input_price).grid(row=2, column=4, sticky="ew", pady=4)
-        ttk.Label(editor, text="输出价 元/M").grid(row=2, column=5, sticky="w", padx=(8, 6), pady=4)
-        ttk.Entry(editor, textvariable=self.tp_output_price).grid(row=2, column=6, sticky="ew", pady=4)
+        ttk.Combobox(editor, textvariable=self.tp_provider, values=SUPPORTED_PROVIDERS, state="readonly").grid(
+            row=0, column=3, sticky="ew", pady=4
+        )
+        ttk.Label(editor, text="模型 ID").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.tp_model).grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(editor, text="Base URL").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.tp_base_url).grid(row=2, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(editor, text="Key 环境变量").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.tp_api_key_env).grid(row=3, column=1, sticky="ew", pady=4)
+        ttk.Label(editor, text="角色").grid(row=3, column=2, sticky="w", padx=(8, 6), pady=4)
+        ttk.Combobox(editor, textvariable=self.tp_roles, values=["vision", "brain", "both"], state="readonly").grid(
+            row=3, column=3, sticky="ew", pady=4
+        )
+        ttk.Checkbutton(editor, text="支持图片输入", variable=self.tp_supports_vision).grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Label(editor, text="输入价 元/M").grid(row=4, column=1, sticky="e", padx=(8, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.tp_input_price, width=12).grid(row=4, column=2, sticky="w", pady=4)
+        ttk.Label(editor, text="输出价 元/M").grid(row=4, column=3, sticky="w", padx=(8, 6), pady=4)
+        ttk.Entry(editor, textvariable=self.tp_output_price, width=12).grid(row=4, column=4, sticky="w", pady=4)
         actions = ttk.Frame(editor)
-        actions.grid(row=3, column=0, columnspan=7, sticky="ew", pady=(8, 0))
+        actions.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 0))
         actions.columnconfigure(0, weight=1)
         ttk.Label(actions, text="只保存环境变量名，不保存 API Key 明文。验证结果会写回 log/third_party_models.json。").grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="保存/更新", command=self._save_third_party_model).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(actions, text="验证", command=self._verify_third_party_model).grid(row=0, column=2, padx=(8, 0))
-        ttk.Button(actions, text="批量导入", command=self._bulk_import_dialog).grid(row=0, column=3, padx=(8, 0))
-        ttk.Button(actions, text="删除选中", command=self._delete_selected_third_party_model).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(actions, text="自动发现", command=self._discover_third_party_models).grid(row=0, column=3, padx=(8, 0))
+        ttk.Button(actions, text="批量导入", command=self._bulk_import_dialog).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(actions, text="清空表单", command=self._clear_third_party_form).grid(row=0, column=5, padx=(8, 0))
+        ttk.Button(actions, text="删除选中", command=self._delete_selected_third_party_model).grid(row=0, column=6, padx=(8, 0))
 
-        self.model_message = self.tk.StringVar(value="")
-        ttk.Label(parent, textvariable=self.model_message).grid(row=3, column=0, columnspan=2, sticky="nw")
+        library = ttk.LabelFrame(parent, text="已保存第三方模型", padding=12)
+        library.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        parent.rowconfigure(1, weight=1)
+        library.columnconfigure(0, weight=1)
+        library.rowconfigure(0, weight=1)
+        self.third_party_tree = self._build_third_party_library(library)
+        ttk.Label(parent, textvariable=self.model_message, wraplength=1100).grid(row=2, column=0, sticky="ew")
 
     def _build_current_model_editor(self, parent, *, provider_var, model_var, base_url_var, api_key_env_var, status_var) -> None:
         ttk = self.ttk
@@ -1387,27 +2328,36 @@ class DocPage2MdGui:
         ttk.Entry(parent, textvariable=api_key_env_var).grid(row=3, column=1, sticky="ew", pady=3)
         ttk.Label(parent, textvariable=status_var, foreground="#0f766e").grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-    def _build_model_list(self, parent, role: str):
+    def _build_model_list(self, parent, role: str, filter_var):
         ttk = self.ttk
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        toolbar.columnconfigure(1, weight=1)
+        ttk.Label(toolbar, text="筛选").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(toolbar, textvariable=filter_var).grid(row=0, column=1, sticky="ew")
+        ttk.Button(toolbar, text="清空", command=lambda: filter_var.set("")).grid(row=0, column=2, padx=(8, 0))
         columns = ("source", "provider", "model", "price", "key")
-        tree = ttk.Treeview(parent, columns=columns, show="headings", height=11)
+        tree = ttk.Treeview(parent, columns=columns, show="headings", height=18)
         for col, label, width in [
             ("source", "来源", 80),
             ("provider", "提供商", 110),
             ("model", "模型", 240),
             ("price", "价格 元/M", 120),
-            ("key", "Key 环境变量", 130),
+            ("key", "Key 状态", 170),
         ]:
             tree.heading(col, text=label)
             tree.column(col, width=width, anchor="w")
-        tree.grid(row=0, column=0, sticky="nsew")
+        tree.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=1, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
-        ttk.Button(parent, text="选择", command=lambda: self._choose_model_from_tree(role, tree)).grid(row=1, column=0, sticky="e", pady=(8, 0))
+        ttk.Button(parent, text="选择为 Vision" if role == ROLE_VISION else "选择为 Brain", command=lambda: self._choose_model_from_tree(role, tree)).grid(
+            row=2, column=0, sticky="e", pady=(8, 0)
+        )
         self._populate_model_tree(tree, role)
+        filter_var.trace_add("write", lambda *_args, t=tree, r=role: self._populate_model_tree(t, r))
         tree.bind("<Double-1>", lambda _event: self._choose_model_from_tree(role, tree))
         tree.bind("<<TreeviewSelect>>", lambda _event: self._load_third_party_editor_from_tree(role, tree))
         return tree
@@ -1415,7 +2365,9 @@ class DocPage2MdGui:
     def _populate_model_tree(self, tree, role: str) -> None:
         for item_id in tree.get_children():
             tree.delete(item_id)
-        for index, item in enumerate(self.catalog.all_models(role), start=1):
+        filter_text = self.vision_filter.get() if role == ROLE_VISION else self.brain_filter.get()
+        items = _filter_model_items(self.catalog.all_models(role), filter_text)
+        for index, item in enumerate(items, start=1):
             iid = f"{role}-{index}"
             self._tree_item_data[iid] = item
             tree.insert(
@@ -1427,13 +2379,72 @@ class DocPage2MdGui:
                     item["provider"],
                     item["model"],
                     _price_brief(item.get("input_price"), item.get("output_price")),
-                    item["api_key_env"],
+                    _key_status_brief(item["api_key_env"]),
+                ),
+            )
+
+    def _build_third_party_library(self, parent):
+        ttk = self.ttk
+        columns = ("name", "provider", "model", "roles", "price", "key", "verify")
+        tree = ttk.Treeview(parent, columns=columns, show="headings", height=12)
+        for col, label, width in [
+            ("name", "名称", 180),
+            ("provider", "提供商", 120),
+            ("model", "模型 ID", 260),
+            ("roles", "角色", 110),
+            ("price", "价格 元/M", 110),
+            ("key", "Key 状态", 170),
+            ("verify", "验证", 130),
+        ]:
+            tree.heading(col, text=label)
+            tree.column(col, width=width, anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scroll.set)
+        tree.bind("<<TreeviewSelect>>", lambda _event: self._load_third_party_editor_from_library(tree))
+        self._populate_third_party_tree(tree)
+        return tree
+
+    def _populate_third_party_tree(self, tree) -> None:
+        for item_id in tree.get_children():
+            tree.delete(item_id)
+        for index, item in enumerate(load_third_party_models(self.base_config), start=1):
+            iid = f"third-party-{index}"
+            self._tree_item_data[iid] = {
+                "source": "third_party",
+                "id": item.get("id"),
+                "name": item.get("name") or item.get("model_id"),
+                "provider": item.get("provider") or "openai_compatible",
+                "model": item.get("model_id") or "",
+                "base_url": item.get("base_url") or "",
+                "api_key_env": item.get("api_key_env") or "OPENAI_API_KEY",
+                "input_price": item.get("input_price"),
+                "output_price": item.get("output_price"),
+                "supports_vision": item.get("supports_vision"),
+                "roles": item.get("roles") or [],
+                "verification": item.get("verification") or {},
+            }
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    item.get("name") or item.get("model_id"),
+                    item.get("provider") or "openai_compatible",
+                    item.get("model_id") or "",
+                    "/".join(item.get("roles") or []),
+                    _price_brief(item.get("input_price"), item.get("output_price")),
+                    _key_status_brief(item.get("api_key_env") or "OPENAI_API_KEY"),
+                    _verification_brief(item.get("verification") or {}),
                 ),
             )
 
     def _bind_updates(self) -> None:
         for var in (
             self.engine_mode,
+            self.layout_engine,
+            self.refine_mode,
             self.model_profile,
             self.source_kind,
             self.source_value,
@@ -1441,6 +2452,23 @@ class DocPage2MdGui:
             self.session_name,
             self.page_ranges,
             self.mineru_model_version,
+            self.mineru_is_ocr,
+            self.mineru_enable_formula,
+            self.mineru_enable_table,
+            self.mineru_language,
+            self.mineru_auto_split_pages,
+            self.mineru_page_chunk_size,
+            self.paddleocr_model,
+            self.paddleocr_api_key_env,
+            self.paddleocr_base_url,
+            self.paddleocr_page_chunk_size,
+            self.paddleocr_doc_orientation,
+            self.paddleocr_doc_unwarping,
+            self.paddleocr_chart_recognition,
+            self.paddleocr_layout_detection,
+            self.paddleocr_formula_recognition,
+            self.paddleocr_table_recognition,
+            self.paddleocr_visualize,
             self.recursive,
             self.vision_workers,
             self.brain_workers,
@@ -1455,6 +2483,9 @@ class DocPage2MdGui:
         ):
             var.trace_add("write", lambda *_args: self._on_options_changed())
         self.document_type.trace_add("write", lambda *_args: self._apply_preset())
+        self.source_kind.trace_add("write", lambda *_args: self._on_source_kind_changed())
+        self.source_value.trace_add("write", lambda *_args: self._sync_input_table_from_source_value())
+        self.page_ranges.trace_add("write", lambda *_args: self._refresh_input_table())
         self.model_profile.trace_add("write", lambda *_args: self._on_profile_changed())
         for var in (
             self.vision_provider,
@@ -1494,6 +2525,18 @@ class DocPage2MdGui:
         if self.document_type.get() != label:
             self.document_type.set(label)
         self.engine_mode.set(ENGINE_MODE_LABELS[mode])
+        if mode in {"hybrid", "mineru_hybrid"}:
+            self.layout_engine.set(LAYOUT_ENGINE_LABELS["mineru"])
+            self.refine_mode.set(REFINE_MODE_LABELS["docpage2md"])
+        elif mode == "mineru_only":
+            self.layout_engine.set(LAYOUT_ENGINE_LABELS["mineru"])
+            self.refine_mode.set(REFINE_MODE_LABELS["none"])
+        elif mode == "paddleocr_hybrid":
+            self.layout_engine.set(LAYOUT_ENGINE_LABELS["paddleocr"])
+            self.refine_mode.set(REFINE_MODE_LABELS["docpage2md"])
+        elif mode == "paddleocr_only":
+            self.layout_engine.set(LAYOUT_ENGINE_LABELS["paddleocr"])
+            self.refine_mode.set(REFINE_MODE_LABELS["none"])
         if model_profile_key(self.model_profile.get()) != profile:
             self.model_profile.set(MODEL_PROFILE_LABELS[profile])
         self._on_options_changed()
@@ -1512,12 +2555,204 @@ class DocPage2MdGui:
         elif kind == "input_files":
             values = filedialog.askopenfilenames(title="选择多个本地文件", filetypes=filetypes)
             value = ";".join(values)
-        elif kind in {"input_folder", "mineru_artifact_dir"}:
+        elif kind in {"input_folder", "mineru_artifact_dir", "paddleocr_artifact_dir"}:
             value = filedialog.askdirectory(title="选择文件夹")
         else:
             value = ""
         if value:
-            self.source_value.set(value)
+            if kind in {"input_file", "input_files"}:
+                paths = [Path(item) for item in split_multi_paths(value)] if kind == "input_files" else [Path(value)]
+                self._set_input_files(paths, source_kind=kind)
+            else:
+                self.source_value.set(value)
+                self.input_files = []
+                self._refresh_input_table()
+
+    def _add_input_files(self) -> None:
+        from tkinter import filedialog
+
+        suffixes = sorted(MINERU_SUPPORTED_SUFFIXES)
+        values = filedialog.askopenfilenames(
+            title="添加本地文件",
+            filetypes=[("支持的文档", " ".join(f"*{suffix}" for suffix in suffixes)), ("所有文件", "*.*")],
+        )
+        if not values:
+            return
+        self.source_kind.set(SOURCE_LABELS["input_files"])
+        self._set_input_files([*self.input_files, *(Path(value) for value in values)], source_kind="input_files")
+
+    def _add_input_folder(self) -> None:
+        from tkinter import filedialog
+
+        value = filedialog.askdirectory(title="添加文件夹")
+        if not value:
+            return
+        self.source_kind.set(SOURCE_LABELS["input_folder"])
+        self.source_value.set(value)
+        self.input_files = source_paths_for_estimate(self._options())
+        self._refresh_input_table()
+
+    def _set_input_files(self, paths: list[Path], *, source_kind: str) -> None:
+        deduped: dict[str, Path] = {}
+        for path in paths:
+            if not str(path).strip():
+                continue
+            deduped[str(path).lower()] = path
+        self.input_files = list(deduped.values())
+        if source_kind == "input_file" and len(self.input_files) <= 1:
+            self.source_kind.set(SOURCE_LABELS["input_file"])
+        else:
+            self.source_kind.set(SOURCE_LABELS["input_files"])
+        self._set_source_value_from_input_files()
+        self._refresh_input_table()
+
+    def _set_source_value_from_input_files(self) -> None:
+        self._syncing_input = True
+        try:
+            kind = source_kind_key(self.source_kind.get())
+            if kind == "input_file":
+                self.source_value.set(str(self.input_files[0]) if self.input_files else "")
+            elif kind == "input_files":
+                self.source_value.set(";".join(str(path) for path in self.input_files))
+        finally:
+            self._syncing_input = False
+
+    def _sync_input_table_from_source_value(self) -> None:
+        if self._syncing_input:
+            return
+        kind = source_kind_key(self.source_kind.get())
+        if kind == "input_file":
+            raw = self.source_value.get().strip().strip('"')
+            self.input_files = [Path(raw)] if raw else []
+        elif kind == "input_files":
+            self.input_files = [Path(item) for item in split_multi_paths(self.source_value.get())]
+        elif kind == "input_folder":
+            self.input_files = source_paths_for_estimate(self._options())
+        else:
+            self.input_files = []
+        self._refresh_input_table()
+
+    def _on_source_kind_changed(self) -> None:
+        kind = source_kind_key(self.source_kind.get())
+        if kind in {"input_file", "input_files"} and self.input_files:
+            self._set_source_value_from_input_files()
+        elif kind == "input_folder" and self.source_value.get():
+            self.input_files = source_paths_for_estimate(self._options())
+        else:
+            self.input_files = []
+        self._refresh_input_table()
+
+    def _refresh_input_table(self) -> None:
+        if not hasattr(self, "input_tree"):
+            return
+        for item_id in self.input_tree.get_children():
+            self.input_tree.delete(item_id)
+        infos = describe_input_files(self.input_files, self.page_ranges.get())
+        for info in infos:
+            self.input_tree.insert(
+                "",
+                "end",
+                iid=str(info.order - 1),
+                values=(
+                    info.order,
+                    info.name,
+                    info.suffix or "-",
+                    info.size_text,
+                    "未知" if info.pages is None else str(info.pages),
+                    info.limit_status,
+                ),
+            )
+        self.input_summary_text.set(_input_summary(infos, source_kind_key(self.source_kind.get()), self.source_value.get()))
+        self._auto_adjust_mineru_model_for_inputs()
+
+    def _selected_input_index(self) -> int | None:
+        if not hasattr(self, "input_tree"):
+            return None
+        selected = self.input_tree.selection()
+        if not selected:
+            return None
+        try:
+            return int(selected[0])
+        except ValueError:
+            return None
+
+    def _remove_selected_inputs(self) -> None:
+        index = self._selected_input_index()
+        if index is None or not (0 <= index < len(self.input_files)):
+            return
+        del self.input_files[index]
+        self.source_kind.set(SOURCE_LABELS["input_files"] if len(self.input_files) != 1 else SOURCE_LABELS["input_file"])
+        self._set_source_value_from_input_files()
+        self._refresh_input_table()
+
+    def _clear_inputs(self) -> None:
+        self.input_files = []
+        self.source_value.set("")
+        self._refresh_input_table()
+
+    def _move_selected_input(self, delta: int) -> None:
+        index = self._selected_input_index()
+        if index is None:
+            return
+        new_index = index + delta
+        if not (0 <= index < len(self.input_files)) or not (0 <= new_index < len(self.input_files)):
+            return
+        self.input_files[index], self.input_files[new_index] = self.input_files[new_index], self.input_files[index]
+        self._set_source_value_from_input_files()
+        self._refresh_input_table()
+        self.input_tree.selection_set(str(new_index))
+
+    def _selected_input_path(self) -> Path | None:
+        index = self._selected_input_index()
+        if index is None or not (0 <= index < len(self.input_files)):
+            return None
+        return self.input_files[index]
+
+    def _open_selected_input(self) -> None:
+        path = self._selected_input_path()
+        if not path or not path.exists():
+            return
+        if os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+
+    def _open_selected_input_folder(self) -> None:
+        path = self._selected_input_path()
+        if not path:
+            return
+        folder = path.parent if path.suffix else path
+        if not folder.exists():
+            return
+        if os.name == "nt":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
+
+    def _preview_selected_input(self) -> None:
+        from tkinter import messagebox
+
+        path = self._selected_input_path()
+        if not path:
+            messagebox.showinfo("预览", "请先选中一个输入文件。")
+            return
+        pages = estimate_path_pages(path, self.page_ranges.get())
+        size = format_file_size(path.stat().st_size) if path.exists() else "未知"
+        messagebox.showinfo("输入预览", f"文件：{path.name}\n路径：{path}\n大小：{size}\n页数：{pages or '未知'}\n\n缩略图预览将在后续版本接入。")
+
+    def _auto_adjust_mineru_model_for_inputs(self) -> None:
+        if layout_engine_key(self.layout_engine.get()) != "mineru" or not self.input_files:
+            return
+        suffixes = {path.suffix.lower() for path in self.input_files}
+        if suffixes and suffixes <= HTML_SUFFIXES:
+            if self.mineru_model_version.get() != "MinerU-HTML":
+                self.mineru_model_version.set("MinerU-HTML")
+        elif self.mineru_model_version.get() == "MinerU-HTML":
+            self.mineru_model_version.set("vlm")
 
     def _browse_output(self) -> None:
         from tkinter import filedialog
@@ -1527,9 +2762,19 @@ class DocPage2MdGui:
             self.output_folder.set(value)
 
     def _options(self) -> GuiRunOptions:
+        layout = layout_engine_key(self.layout_engine.get())
+        refine = refine_mode_key(self.refine_mode.get())
+        if layout == "mineru":
+            engine = "mineru_hybrid" if refine == "docpage2md" else "mineru_only"
+        elif layout == "paddleocr":
+            engine = "paddleocr_hybrid" if refine == "docpage2md" else "paddleocr_only"
+        else:
+            engine = "vision_only"
         return GuiRunOptions(
             document_type=document_type_key(self.document_type.get()),
-            engine_mode=self.engine_mode.get(),
+            engine_mode=engine,
+            layout_engine=self.layout_engine.get(),
+            refine_mode=self.refine_mode.get(),
             model_profile=self.model_profile.get(),
             source_kind=source_kind_key(self.source_kind.get()),
             source_value=self.source_value.get(),
@@ -1537,6 +2782,23 @@ class DocPage2MdGui:
             session_name=self.session_name.get(),
             page_ranges=self.page_ranges.get(),
             mineru_model_version=self.mineru_model_version.get(),
+            mineru_is_ocr=self.mineru_is_ocr.get(),
+            mineru_enable_formula=self.mineru_enable_formula.get(),
+            mineru_enable_table=self.mineru_enable_table.get(),
+            mineru_language=self.mineru_language.get(),
+            mineru_auto_split_pages=self.mineru_auto_split_pages.get(),
+            mineru_page_chunk_size=self.mineru_page_chunk_size.get(),
+            paddleocr_model=self.paddleocr_model.get(),
+            paddleocr_api_key_env=self.paddleocr_api_key_env.get(),
+            paddleocr_base_url=self.paddleocr_base_url.get(),
+            paddleocr_page_chunk_size=self.paddleocr_page_chunk_size.get(),
+            paddleocr_doc_orientation=self.paddleocr_doc_orientation.get(),
+            paddleocr_doc_unwarping=self.paddleocr_doc_unwarping.get(),
+            paddleocr_chart_recognition=self.paddleocr_chart_recognition.get(),
+            paddleocr_layout_detection=self.paddleocr_layout_detection.get(),
+            paddleocr_formula_recognition=self.paddleocr_formula_recognition.get(),
+            paddleocr_table_recognition=self.paddleocr_table_recognition.get(),
+            paddleocr_visualize=self.paddleocr_visualize.get(),
             recursive=self.recursive.get(),
             vision_workers=self.vision_workers.get(),
             brain_workers=self.brain_workers.get(),
@@ -1563,13 +2825,20 @@ class DocPage2MdGui:
 
     def _refresh_runtime_summary(self) -> None:
         document_key = document_type_key(self.document_type.get())
-        mode_key = engine_mode_key(self.engine_mode.get())
+        mode_key = workflow_engine_mode(self._options())
+        layout = layout_engine_key(self.layout_engine.get())
+        refine = refine_mode_key(self.refine_mode.get())
         profile_key = model_profile_key(self.model_profile.get())
+        try:
+            mineru_model = effective_mineru_model_version(self._options()) if layout == "mineru" and self.source_value.get().strip() else self.mineru_model_version.get()
+        except ValueError as exc:
+            mineru_model = f"配置需调整：{exc}"
+        parser_model = f"MinerU {mineru_model}" if layout == "mineru" else f"PaddleOCR {self.paddleocr_model.get()}"
         self.run_summary_text.set(
-            "文档类型只负责填推荐预设，不会锁死旁边选项；你可以手动覆盖处理模式和模型档位。\n"
-            f"文档类型：{DOCUMENT_PRESET_DESCRIPTIONS.get(document_key, '')}\n"
-            f"处理模式：{ENGINE_MODE_DESCRIPTIONS.get(mode_key, '')}\n"
-            f"模型档位：{MODEL_PROFILE_DESCRIPTIONS.get(profile_key, '')}"
+            "文档类型只设置推荐值，可手动覆盖模式、档位和模型。\n"
+            f"当前：{DOCUMENT_PRESETS.get(document_key, DOCUMENT_PRESETS['custom'])[0]} / "
+            f"{ENGINE_MODE_LABELS.get(mode_key, mode_key)} / {LAYOUT_ENGINE_LABELS.get(layout, layout)} / "
+            f"{REFINE_MODE_LABELS.get(refine, refine)} / {MODEL_PROFILE_LABELS.get(profile_key, profile_key)} / {parser_model}"
         )
 
     def _refresh_cost_estimate(self, silent: bool = False) -> None:
@@ -1579,36 +2848,84 @@ class DocPage2MdGui:
             if not silent:
                 self.cost_summary_text.set(f"成本估算失败：{exc}")
             return
-        row_bits = []
-        for row in summary.rows[:3]:
-            pages = "未知页数" if row.pages is None else f"{row.pages} 页"
-            crops = "未知裁剪块" if row.crop_blocks is None else f"{row.crop_blocks} 个裁剪块"
-            cost = "价格未知" if row.estimated_cost is None else f"¥{row.estimated_cost:.2f}"
-            row_bits.append(f"{row.name}: {pages}, {crops}, {cost}, {row.confidence}可信")
-        if len(summary.rows) > 3:
-            row_bits.append(f"另有 {len(summary.rows) - 3} 个文件未展开")
-        detail = "；".join(row_bits)
-        self.cost_summary_text.set(f"成本估算：{summary.format_brief()}" + (f"\n{detail}" if detail else ""))
+        self.cost_summary_text.set(f"模型成本估算：{summary.format_brief()}\nMinerU/PaddleOCR 显示为平台额度/限制，不计入人民币费用。")
+        if hasattr(self, "cost_tree"):
+            for item_id in self.cost_tree.get_children():
+                self.cost_tree.delete(item_id)
+            rows = summary.rows or [
+                CostEstimateRow(
+                    "平台解析",
+                    summary.total_pages,
+                    0,
+                    summary.total_input_tokens,
+                    summary.total_output_tokens,
+                    summary.total_cost,
+                    summary.confidence,
+                    summary.note,
+                )
+            ]
+            for index, row in enumerate(rows, start=1):
+                self.cost_tree.insert(
+                    "",
+                    "end",
+                    iid=f"cost-{index}",
+                    values=(
+                        row.name,
+                        "未知" if row.pages is None else row.pages,
+                        "未知" if row.crop_blocks is None else row.crop_blocks,
+                        _format_token_count(row.input_tokens),
+                        _format_token_count(row.output_tokens),
+                        "未知" if row.estimated_cost is None else f"¥{row.estimated_cost:.2f}",
+                        row.confidence,
+                    ),
+                )
 
     def _validate_before_run(self, options: GuiRunOptions) -> None:
         build_cli_argv(options)
+        engine_mode = workflow_engine_mode(options)
+        layout_engine = layout_engine_key(options.layout_engine)
+        if engine_mode in {"hybrid", "mineru_hybrid", "paddleocr_hybrid"}:
+            model_issues = validate_selected_models(options.vision, options.brain)
+            model_issues.extend(missing_model_key_messages(options.vision, options.brain))
+            if model_issues:
+                raise ValueError("模型配置不完整：\n- " + "\n- ".join(model_issues))
         source_kind = source_kind_key(options.source_kind)
         if source_kind == "mineru_url":
             if not re.match(r"^https?://", options.source_value.strip(), flags=re.IGNORECASE):
                 raise ValueError("远程 URL 需要以 http:// 或 https:// 开头。")
+            if layout_engine == "paddleocr":
+                if not get_env_value(options.paddleocr_api_key_env):
+                    raise ValueError(f"远程 URL 通过 PaddleOCR 解析需要 {options.paddleocr_api_key_env}，当前未检测到。")
+            elif not get_env_value("MINERU_API_TOKEN"):
+                raise ValueError("远程 URL 解析需要 MINERU_API_TOKEN，当前未检测到。")
+            Path(options.output_folder).mkdir(parents=True, exist_ok=True)
             return
         paths = split_multi_paths(options.source_value) if source_kind == "input_files" else [options.source_value.strip().strip('"')]
+        local_paths: list[Path] = []
         for raw_path in paths:
             path = Path(raw_path)
-            if source_kind in {"input_folder", "mineru_artifact_dir"}:
+            if source_kind in {"input_folder", "mineru_artifact_dir", "paddleocr_artifact_dir"}:
                 if not path.exists() or not path.is_dir():
                     raise ValueError(f"目录不存在: {path}")
             else:
                 if not path.exists() or not path.is_file():
                     raise ValueError(f"文件不存在: {path}")
-                if path.suffix.lower() not in MINERU_SUPPORTED_SUFFIXES:
-                    supported = ", ".join(sorted(MINERU_SUPPORTED_SUFFIXES))
-                    raise ValueError(f"不支持的文件类型: {path.suffix}。支持: {supported}")
+                if layout_engine == "paddleocr":
+                    if path.suffix.lower() != ".pdf" and path.suffix.lower() not in IMAGE_SUFFIXES:
+                        raise ValueError(f"PaddleOCR 当前支持 PDF 和图片，不支持: {path.suffix}")
+                    if path.stat().st_size > PADDLEOCR_LOCAL_FILE_LIMIT_BYTES:
+                        raise ValueError(f"PaddleOCR 本地上传单文件限制为 50MB：{path.name}")
+                else:
+                    if path.suffix.lower() not in MINERU_SUPPORTED_SUFFIXES:
+                        supported = ", ".join(sorted(MINERU_SUPPORTED_SUFFIXES))
+                        raise ValueError(f"不支持的文件类型: {path.suffix}。支持: {supported}")
+                local_paths.append(path)
+        if local_paths and layout_engine == "mineru":
+            validate_mineru_model_version_for_paths(local_paths, effective_mineru_model_version(options))
+        if layout_engine == "paddleocr" and source_kind != "paddleocr_artifact_dir" and not get_env_value(options.paddleocr_api_key_env):
+            raise ValueError(f"本地文件/文件夹通过 PaddleOCR API 解析需要 {options.paddleocr_api_key_env}，当前未检测到。")
+        if layout_engine == "mineru" and source_kind != "mineru_artifact_dir" and not get_env_value("MINERU_API_TOKEN"):
+            raise ValueError("本地文件/文件夹通过 MinerU API 解析需要 MINERU_API_TOKEN，当前未检测到。")
         Path(options.output_folder).mkdir(parents=True, exist_ok=True)
 
     def _start_process(self) -> None:
@@ -1619,6 +2936,8 @@ class DocPage2MdGui:
         options = self._options()
         try:
             self._validate_before_run(options)
+            if not self._confirm_chunked_run_if_needed(options):
+                return
             command = build_process_command(options, self.repo_root)
         except ValueError as exc:
             messagebox.showerror("无法开始", str(exc))
@@ -1644,6 +2963,43 @@ class DocPage2MdGui:
         self.reader_thread = threading.Thread(target=self._read_process_output, daemon=True)
         self.reader_thread.start()
 
+    def _confirm_chunked_run_if_needed(self, options: GuiRunOptions) -> bool:
+        from tkinter import messagebox
+
+        layout_engine = layout_engine_key(options.layout_engine)
+        source_kind = source_kind_key(options.source_kind)
+        if source_kind not in {"input_file", "input_files"}:
+            return True
+        paths = local_input_paths_for_options(options, require_exists=False)
+        chunk_lines: list[str] = []
+        chunk_size = (
+            _positive_worker_count(options.paddleocr_page_chunk_size, "PaddleOCR 分段页数")
+            if layout_engine == "paddleocr"
+            else _positive_worker_count(options.mineru_page_chunk_size, "MinerU 分段页数")
+        )
+        if layout_engine == "mineru" and not options.mineru_auto_split_pages:
+            return True
+        for path in paths:
+            if path.suffix.lower() != ".pdf" or not path.exists():
+                continue
+            pages = estimate_pdf_pages(path)
+            if not pages:
+                continue
+            chunks = build_page_chunks(pages, options.page_ranges, chunk_size=chunk_size)
+            if len(chunks) > 1:
+                ranges = "，".join(chunk.page_ranges for chunk in chunks[:4])
+                if len(chunks) > 4:
+                    ranges += "，..."
+                chunk_lines.append(f"{path.name}: 共 {pages} 页，将拆成 {len(chunks)} 段（{ranges}）")
+        if not chunk_lines:
+            return True
+        return messagebox.askyesno(
+            "确认自动分段",
+            f"以下 PDF 将按页码分段提交 {LAYOUT_ENGINE_LABELS.get(layout_engine, layout_engine)}，并在结束后自动合并 FULL Markdown：\n\n"
+            + "\n".join(chunk_lines)
+            + "\n\n是否继续？",
+        )
+
     def _read_process_output(self) -> None:
         assert self.process is not None
         if self.process.stdout:
@@ -1662,6 +3018,9 @@ class DocPage2MdGui:
                     self._apply_progress_snapshot(self.progress_tracker.observe_line(line))
                 elif kind == "done":
                     self._on_process_done(int(payload))
+                elif kind == "catalog":
+                    self._reload_model_catalog()
+                    self.cost_summary_text.set(str(payload))
         except queue.Empty:
             pass
         self.root.after(100, self._drain_output_queue)
@@ -1817,6 +3176,46 @@ class DocPage2MdGui:
         self.tp_input_price.set("" if item.get("input_price") is None else str(item.get("input_price")))
         self.tp_output_price.set("" if item.get("output_price") is None else str(item.get("output_price")))
 
+    def _load_third_party_editor_from_library(self, tree) -> None:
+        selected = tree.selection()
+        if not selected:
+            return
+        item = self._tree_item_data.get(selected[0])
+        if not item:
+            return
+        self._load_third_party_item_into_editor(item)
+
+    def _load_third_party_item_into_editor(self, item: dict) -> None:
+        self.third_party_id.set(item.get("id") or "")
+        self.tp_name.set(item.get("name") or item.get("model") or "")
+        self.tp_provider.set(item.get("provider") or "openai_compatible")
+        self.tp_model.set(item.get("model") or "")
+        self.tp_base_url.set(item.get("base_url") or "")
+        self.tp_api_key_env.set(item.get("api_key_env") or "OPENAI_API_KEY")
+        roles = item.get("roles") or []
+        if ROLE_VISION in roles and ROLE_BRAIN in roles:
+            self.tp_roles.set("both")
+        elif ROLE_VISION in roles:
+            self.tp_roles.set("vision")
+        else:
+            self.tp_roles.set("brain")
+        self.tp_supports_vision.set(bool(item.get("supports_vision")))
+        self.tp_input_price.set("" if item.get("input_price") is None else str(item.get("input_price")))
+        self.tp_output_price.set("" if item.get("output_price") is None else str(item.get("output_price")))
+
+    def _clear_third_party_form(self) -> None:
+        self.third_party_id.set("")
+        self.tp_name.set("")
+        self.tp_provider.set("openai_compatible")
+        self.tp_model.set("")
+        self.tp_base_url.set("https://api.openai.com/v1")
+        self.tp_api_key_env.set("OPENAI_API_KEY")
+        self.tp_roles.set("both")
+        self.tp_supports_vision.set(True)
+        self.tp_input_price.set("")
+        self.tp_output_price.set("")
+        self.model_message.set("已清空第三方模型表单。")
+
     def _save_selected_models(self) -> None:
         selected = AppConfig(
             vision_provider=self.vision_provider.get(),
@@ -1843,11 +3242,21 @@ class DocPage2MdGui:
             f"价格：{_model_price_for_selection(self.brain_provider.get(), self.brain_model.get(), self.base_config)}"
         )
         profile = model_profile_key(self.model_profile.get())
+        issues = validate_selected_models(
+            SelectedModel(self.vision_provider.get(), self.vision_model.get(), self.vision_base_url.get(), self.vision_api_key_env.get()),
+            SelectedModel(self.brain_provider.get(), self.brain_model.get(), self.brain_base_url.get(), self.brain_api_key_env.get()),
+        )
+        missing_keys = missing_model_key_messages(
+            SelectedModel(self.vision_provider.get(), self.vision_model.get(), self.vision_base_url.get(), self.vision_api_key_env.get()),
+            SelectedModel(self.brain_provider.get(), self.brain_model.get(), self.brain_base_url.get(), self.brain_api_key_env.get()),
+        )
+        health = "模型配置完整。" if not issues and not missing_keys else "模型配置需要处理：" + "；".join(issues + missing_keys)
         self.model_summary_text.set(
             f"当前档位：{model_profile_label(profile)}。"
             f"Vision={self.vision_provider.get()}:{self.vision_model.get()}；"
             f"Brain={self.brain_provider.get()}:{self.brain_model.get()}。"
-            "在这里手动改模型后，运行命令会自动带上覆盖参数。"
+            "在这里手动改模型后，运行命令会自动带上覆盖参数。\n"
+            f"{health}"
         )
 
     def _prompt_save_key(self) -> None:
@@ -1915,14 +3324,46 @@ class DocPage2MdGui:
             return
         item_id = self.third_party_id.get()
         if item_id:
-            role = ROLE_VISION if is_vision else ROLE_BRAIN
+            roles_to_update = [ROLE_VISION, ROLE_BRAIN] if self.tp_roles.get() == "both" else [ROLE_VISION if is_vision else ROLE_BRAIN]
             try:
-                update_third_party_model_verification(self.base_config, item_id, role, status, error or "")
+                for role in roles_to_update:
+                    update_third_party_model_verification(self.base_config, item_id, role, status, error or "")
                 self._reload_model_catalog()
             except ValueError as exc:
                 self.model_message.set(f"验证完成但写回失败: {exc}")
                 return
         self.model_message.set(f"验证结果: {status} {(error or '')[:160]}")
+
+    def _discover_third_party_models(self) -> None:
+        api_key = get_env_value(self.tp_api_key_env.get())
+        if not api_key:
+            self.model_message.set(f"未检测到环境变量 {self.tp_api_key_env.get()}，无法自动发现模型。")
+            return
+        if self.tp_provider.get() != "openai_compatible":
+            self.model_message.set("自动发现当前只支持 OpenAI-compatible Provider。")
+            return
+        try:
+            discovered = discover_openai_compatible_models(self.tp_base_url.get(), api_key)
+        except Exception as exc:
+            self.model_message.set(f"自动发现失败: {exc}")
+            return
+        if not discovered:
+            self.model_message.set("自动发现没有返回可导入模型。")
+            return
+        imported = 0
+        try:
+            for item in discovered:
+                item["base_url"] = self.tp_base_url.get()
+                item["api_key_env"] = self.tp_api_key_env.get()
+                if self.tp_roles.get() != "both":
+                    item["roles"] = self.tp_roles.get()
+                upsert_third_party_model(self.base_config, item)
+                imported += 1
+        except ValueError as exc:
+            self.model_message.set(str(exc))
+            return
+        self._reload_model_catalog()
+        self.model_message.set(f"自动发现并导入 {imported} 个模型。")
 
     def _bulk_import_dialog(self) -> None:
         from tkinter import simpledialog
@@ -1939,8 +3380,12 @@ class DocPage2MdGui:
                 "roles": self.tp_roles.get(),
             },
         )
-        for item in items:
-            upsert_third_party_model(self.base_config, item)
+        try:
+            for item in items:
+                upsert_third_party_model(self.base_config, item)
+        except ValueError as exc:
+            self.model_message.set(str(exc))
+            return
         self._reload_model_catalog()
         self.model_message.set(f"已导入 {len(items)} 个第三方模型。")
 
@@ -1948,6 +3393,8 @@ class DocPage2MdGui:
         self.catalog = ModelCatalogView(self.base_config)
         self._populate_model_tree(self.vision_list, ROLE_VISION)
         self._populate_model_tree(self.brain_list, ROLE_BRAIN)
+        if hasattr(self, "third_party_tree"):
+            self._populate_third_party_tree(self.third_party_tree)
 
 
 def _optional_float(raw: str):
@@ -1966,6 +3413,57 @@ def _price_brief(input_price, output_price) -> str:
     inp = "?" if input_price is None else f"{float(input_price):g}"
     out = "?" if output_price is None else f"{float(output_price):g}"
     return f"{inp}/{out}"
+
+
+def _format_token_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.3f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def _catalog_diff_brief(diff: dict, errors: list[dict]) -> str:
+    added = len(diff.get("added") or [])
+    removed = len(diff.get("removed") or [])
+    changed = len(diff.get("price_changed") or [])
+    parts = [f"新增 {added}", f"消失 {removed}", f"价格变化 {changed}"]
+    if errors:
+        parts.append("错误：" + "；".join(f"{item.get('provider')}:{item.get('stage')}" for item in errors[:4]))
+    return "差异摘要：" + "，".join(parts)
+
+
+def _key_status_brief(env_name: str) -> str:
+    env_name = (env_name or "").strip()
+    if not env_name:
+        return "未配置"
+    return f"{env_name} {'已设置' if get_env_value(env_name) else '未设置'}"
+
+
+def _verification_brief(verification: dict) -> str:
+    if not verification:
+        return "未验证"
+    parts = []
+    for key, label in (("vision", "Vision"), ("text", "文本"), ("dashscope", "DashScope")):
+        value = verification.get(key)
+        if value:
+            parts.append(f"{label}:{'通过' if value == 'ok' else '失败'}")
+    return "；".join(parts) if parts else "未验证"
+
+
+def _filter_model_items(items: list[dict], filter_text: str) -> list[dict]:
+    needle = (filter_text or "").strip().lower()
+    if not needle:
+        return items
+    result = []
+    for item in items:
+        haystack = " ".join(
+            str(item.get(key) or "")
+            for key in ("source", "name", "provider", "model", "api_key_env")
+        ).lower()
+        if needle in haystack:
+            result.append(item)
+    return result
 
 
 def _model_price_for_selection(provider: str, model_id: str, config: AppConfig) -> str:

@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from docpage2md_app.gui import (
+    describe_input_files,
+    effective_mineru_model_version,
     GuiProgressTracker,
     GuiRunOptions,
     SelectedModel,
@@ -14,7 +16,10 @@ from docpage2md_app.gui import (
     estimate_pdf_pages,
     split_multi_paths,
     translate_log_line,
+    missing_model_key_messages,
+    validate_selected_models,
 )
+from docpage2md_app.input_inspection import build_page_chunks
 
 
 def test_gui_builds_single_file_hybrid_command(tmp_path):
@@ -32,24 +37,18 @@ def test_gui_builds_single_file_hybrid_command(tmp_path):
 
     argv = build_cli_argv(options)
 
-    assert argv[:16] == [
-        "--engine-mode",
-        "hybrid",
-        "--document-type",
-        "handwritten_notes",
-        "--model-profile",
-        "balanced",
-        "--output",
-        str(tmp_path / "out"),
-        "--page-ranges",
-        "1-5",
-        "--mineru-model-version",
-        "vlm",
-        "--vision-workers",
-        "60",
-        "--brain-workers",
-        "60",
-    ]
+    assert argv[argv.index("--engine-mode") + 1] == "hybrid"
+    assert argv[argv.index("--document-type") + 1] == "handwritten_notes"
+    assert argv[argv.index("--model-profile") + 1] == "balanced"
+    assert argv[argv.index("--output") + 1] == str(tmp_path / "out")
+    assert argv[argv.index("--page-ranges") + 1] == "1-5"
+    assert argv[argv.index("--mineru-model-version") + 1] == "vlm"
+    assert argv[argv.index("--mineru-is-ocr") + 1] == "true"
+    assert argv[argv.index("--mineru-enable-formula") + 1] == "true"
+    assert argv[argv.index("--mineru-enable-table") + 1] == "true"
+    assert argv[argv.index("--mineru-language") + 1] == "ch"
+    assert argv[argv.index("--vision-workers") + 1] == "60"
+    assert argv[argv.index("--brain-workers") + 1] == "60"
     assert argv[-2:] == [
         "--input-file",
         str(pdf),
@@ -187,6 +186,99 @@ def test_gui_adds_worker_override_args(tmp_path):
     assert argv[argv.index("--brain-workers") + 1] == "65"
 
 
+def test_gui_adds_mineru_advanced_args(tmp_path):
+    options = GuiRunOptions(
+        source_value="https://example.com/notes.pdf",
+        source_kind="mineru_url",
+        output_folder=str(tmp_path / "out"),
+        mineru_is_ocr=False,
+        mineru_enable_formula=True,
+        mineru_enable_table=False,
+        mineru_language="en",
+        mineru_page_chunk_size="150",
+    )
+
+    argv = build_cli_argv(options)
+
+    assert argv[argv.index("--mineru-is-ocr") + 1] == "false"
+    assert argv[argv.index("--mineru-enable-formula") + 1] == "true"
+    assert argv[argv.index("--mineru-enable-table") + 1] == "false"
+    assert argv[argv.index("--mineru-language") + 1] == "en"
+    assert argv[argv.index("--mineru-page-chunk-size") + 1] == "150"
+
+
+def test_gui_html_input_auto_uses_mineru_html(tmp_path):
+    html = tmp_path / "page.html"
+    html.write_text("<html></html>", encoding="utf-8")
+    options = GuiRunOptions(source_kind="input_file", source_value=str(html), output_folder=str(tmp_path / "out"))
+
+    assert effective_mineru_model_version(options) == "MinerU-HTML"
+    argv = build_cli_argv(options)
+    assert argv[argv.index("--mineru-model-version") + 1] == "MinerU-HTML"
+
+
+def test_gui_rejects_non_html_with_mineru_html(tmp_path):
+    pdf = tmp_path / "notes.pdf"
+    pdf.write_bytes(b"%PDF")
+    options = GuiRunOptions(
+        source_kind="input_file",
+        source_value=str(pdf),
+        mineru_model_version="MinerU-HTML",
+        output_folder=str(tmp_path / "out"),
+    )
+
+    with pytest.raises(ValueError, match="MinerU-HTML"):
+        build_cli_argv(options)
+
+
+def test_gui_page_chunk_ranges_for_401_pages():
+    chunks = build_page_chunks(401, chunk_size=200)
+
+    assert [chunk.page_ranges for chunk in chunks] == ["1-200", "201-400", "401-401"]
+    assert [chunk.page_count for chunk in chunks] == [200, 200, 1]
+
+
+def test_gui_input_description_marks_over_limit_pdf(tmp_path):
+    pdf = tmp_path / "big.pdf"
+    pdf.write_bytes(b"%PDF\n" + b"\n".join([b"<< /Type /Page >>"] * 201))
+
+    infos = describe_input_files([pdf])
+
+    assert infos[0].pages == 201
+    assert "分" in infos[0].limit_status
+
+
+def test_gui_model_validation_rejects_incomplete_vision_model():
+    issues = validate_selected_models(
+        vision=SelectedModel("deepseek", "", "", ""),
+        brain=SelectedModel("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "DEEPSEEK_API_KEY"),
+    )
+
+    assert any("Vision 模型 ID" in issue for issue in issues)
+    assert any("Vision Key 环境变量名" in issue for issue in issues)
+    assert any("Vision 不能使用 DeepSeek" in issue for issue in issues)
+
+
+def test_gui_model_validation_accepts_complete_manual_models():
+    issues = validate_selected_models(
+        vision=SelectedModel("openai_compatible", "vendor/vision", "https://vendor.example/v1", "VISION_KEY"),
+        brain=SelectedModel("openai_compatible", "vendor/brain", "https://vendor.example/v1", "BRAIN_KEY"),
+    )
+
+    assert issues == []
+
+
+def test_gui_missing_model_key_messages_dedupes_env_names(monkeypatch):
+    monkeypatch.delenv("SAME_KEY", raising=False)
+
+    messages = missing_model_key_messages(
+        vision=SelectedModel("openai_compatible", "vendor/vision", "https://vendor.example/v1", "SAME_KEY"),
+        brain=SelectedModel("openai_compatible", "vendor/brain", "https://vendor.example/v1", "SAME_KEY"),
+    )
+
+    assert messages == ["Vision 需要环境变量 SAME_KEY，当前未检测到。"]
+
+
 def test_gui_rejects_bad_worker_count():
     options = GuiRunOptions(source_kind="mineru_url", source_value="https://example.com/a.pdf", vision_workers="0")
 
@@ -304,6 +396,15 @@ def test_gui_log_translation_uses_chinese_progress_text():
     assert "开始并行识别裁剪块" in translated
     assert "裁剪块=12" in translated
     assert "workers" not in translated
+
+
+def test_gui_log_translation_covers_mineru_chunking():
+    line = "2026-06-24 18:44:04 +   24.6s | MinerU chunk 2/3 submit: page_ranges=201-400, pages=200\n"
+
+    translated = translate_log_line(line)
+
+    assert "正在提交 MinerU 分段" in translated
+    assert "页码=201-400" in translated
 
 
 def test_progress_tracker_updates_from_hybrid_log_lines(tmp_path):

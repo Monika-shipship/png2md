@@ -19,13 +19,29 @@ Internal code should use DocPage2MD naming only: `process_single_docpage_task`, 
 
 ## Current Architecture
 
-DocPage2MD has three processing modes:
+DocPage2MD has five processing modes:
 
 - `mineru_only`: call or read MinerU output, render clean Markdown from MinerU layout/json/crops.
+- `mineru_hybrid` / `hybrid`: MinerU layout/crops first, then crop vision + Brain JSON ops + checked refiner + deterministic renderer.
+- `paddleocr_only`: call or read PaddleOCR output, adapt `layoutParsingResults` / Markdown / images to DocumentIR, then render clean Markdown.
+- `paddleocr_hybrid`: PaddleOCR DocumentIR plus DocPage2MD crop Vision / Brain refinement.
 - `vision_only`: legacy image-folder flow for page images.
-- `hybrid`: MinerU layout/crops first, then crop vision + Brain JSON ops + checked refiner + deterministic renderer.
 
-The Tkinter GUI is the current lightweight desktop entry. It supports local single file, multiple files, folder batch, MinerU artifact and URL inputs; Chinese labels/logs; progress/ETA; cost estimate; output folder opening; Vision/Brain worker controls; and model management. The longer-term WebUI plan is tracked in `docs/plans/webui-roadmap.md`.
+The Tkinter GUI is the current lightweight desktop entry. It supports local single file, multiple files, folder batch, MinerU artifact, PaddleOCR artifact and URL inputs; Chinese labels/logs; progress/ETA; cost estimate; output folder opening; Vision/Brain worker controls; and model management. The run tab is split into left-side workflow/input/output controls and right-side progress/cost/log controls.
+
+Current GUI details:
+
+- Input is a visual file table, not a raw path box. It shows file name, suffix, size, pages, processing order and limit status.
+- Main workflow text is short; detailed explanations live behind `?` help buttons.
+- Advanced MinerU settings are collapsed by default and pass CLI args for OCR/formula/table/language.
+- MinerU defaults to `vlm`; HTML/HTM automatically uses `MinerU-HTML`; non-HTML cannot use `MinerU-HTML`.
+- Local PDF inputs can enable automatic MinerU page splitting, with final chunk merge/audit.
+- Cost UI is a table and only estimates Vision/Brain token fees; MinerU/PaddleOCR are quota/limit notes.
+- Model management is provider-first: Provider/Key, role binding, candidate models and third-party model library.
+- PaddleOCR is selectable as a parser engine, default model `PaddleOCR-VL-1.6`, async endpoint `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`, default PDF chunk size 100 pages.
+- Official model/price refresh is available through CLI and GUI background refresh, with provider-aware diff summary and local fallback.
+
+The longer-term WebUI plan is tracked in `docs/plans/webui-roadmap.md`. PaddleOCR status and follow-up comparison work are tracked in `docs/plans/paddleocr-integration-roadmap.md`.
 
 Hybrid parallelism is active:
 
@@ -44,6 +60,7 @@ Diagnostics and audit data belong in:
 - `process.log`
 - `ir/`
 - `mineru_raw/`
+- `paddleocr_raw/`
 
 Do not put stack traces, API errors, model reasoning, coverage diagnostics, or validator dumps into user Markdown.
 
@@ -70,6 +87,7 @@ Recommended future log cleanup behavior:
 - MinerU setup: `docs/architecture/mineru-api-setup.md`
 - Hybrid region recovery plan: `docs/plans/hybrid-region-revision-roadmap.md`
 - WebUI plan: `docs/plans/webui-roadmap.md`
+- PaddleOCR integration plan: `docs/plans/paddleocr-integration-roadmap.md`
 - Change history: `docs/changelog.md`
 - Research comparison: `docs/research/comparison-and-docpage2md-roadmap.md`
 
@@ -82,8 +100,21 @@ Expected environment variables:
 - `MINERU_API_TOKEN`
 - `DASHSCOPE_API_KEY`
 - `DEEPSEEK_API_KEY`
+- `PADDLEOCR_API_TOKEN`
 
 Logs and reports may record env var names, providers, models, task IDs and trace IDs. They must not record actual token values.
+
+Local PaddleOCR real samples should live under ignored `tests/test-PaddleOCR/`. Local PaddleOCR token notes may live in ignored `.env.paddleocr.local.md`; never commit token values.
+
+GUI model management checks provider/model/base_url/api_key_env completeness and missing Vision/Brain environment variables before starting hybrid modes. Third-party model auto-discovery uses OpenAI-compatible `/models` and imports only model metadata plus env var names. Official refresh covers DashScope, DeepSeek and OpenAI-compatible providers; OpenAI-compatible prices are never guessed.
+
+Secret lookup is centralized in `docpage2md_app/secrets.py`. Supported storage:
+
+- process/Windows user environment variables
+- local ignored `.env.local.json`
+- Windows Credential Manager when available
+
+Logs, command previews and reports must only show key names.
 
 ## Verification Commands
 
@@ -112,9 +143,13 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
-- `python -m pytest -q`: 248 passed.
+- `python -m pytest -q`: 279 passed.
 - `git diff --check`: passed, with only CRLF conversion warnings.
+- GUI construction smoke passed: `DocPage2MdGui()` can construct, update idle tasks and destroy cleanly after the input table/provider/cost redesign.
 - `python -m pytest tests/test_cli.py tests/test_gui.py tests/test_hybrid_enrichment.py tests/test_mineru_pipeline.py tests/test_files_and_session.py tests/test_run_logger.py -q`: 41 passed during GUI/log/performance work.
+- `python -m pytest tests/test_gui.py tests/test_paddleocr_adapter.py tests/test_paddleocr_client.py tests/test_paddleocr_pipeline.py tests/test_official_catalog.py -q`: 45 passed during PaddleOCR/model refresh work.
+- PaddleOCR offline tests cover adapter, client fake HTTP, pipeline rendering and chunk merge.
+- PaddleOCR adapter confidence values are numeric floats in `0.0-1.0`; human confidence labels are stored separately as `confidence_label`. This is required because the hybrid refiner treats `block.confidence` as numeric.
 - Historical alias search: no working-tree matches.
 - Public fixture artifact smoke can run without network or private data.
 - Private real API smoke should use ignored files under `input_docs/` or another local path; do not commit those inputs or outputs.
@@ -128,6 +163,14 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
   - `run_report.json`: `status=ok`, `engine_mode=hybrid`, `pages_ok=11/11`.
   - Parallelism confirmed in Chinese `process.log`: crop Vision 49 blocks in about 14.0s, Brain 11 pages in about 109.8s, total about 124.2s.
   - Final Markdown uses default-closed `<details>` blocks and passed the no-key/no-traceback/no-reasoning/no-validator-diagnostics checks.
+- Latest PaddleOCR real verification:
+  - Source: `tests/群论笔记4.1.pdf`.
+  - Output: `markdown_output/paddleocr_real_verify_4_1_hybrid_fixed/paddleocr_4_1_hybrid_fixed`.
+  - Full 11 pages, `paddleocr_hybrid + balanced`, layout model `PaddleOCR-VL-1.6`, Vision `qwen3-vl-plus`, Brain `deepseek-v4-flash`.
+  - `run_report.json`: `status=ok`, `engine_mode=paddleocr_hybrid`, final pages `ok=11/11`, Brain pages `partial=11/11`.
+  - No Brain thread failures and no `could not convert string to float` confidence error after numeric confidence normalization.
+  - Real process log total about `124.9s`: PaddleOCR submit/parse about `1.4s`, artifact download/cache about `21.3s`, Brain enrichment about `102.0s`, render/report about `0.1s`.
+  - Final Markdown passed the no-key/no-traceback/no-confidence-error/no-validator-text/no-reasoning checks.
 - `群论笔记4.1.pdf` performance from existing full log: total about 114s in `gui_parallel_full_verify`, and about 108s in the later direct run. Breakdown from the later direct run: MinerU about 6.1s, crop Vision 49 blocks about 27.2s, Brain 11 pages about 75.0s, render/report about 0.1s. Bottleneck is Brain provider latency and long-tail page complexity, not missing page-level parallelism.
 - New `process.log` output is translated to Chinese by `RunLogger`; old logs generated before this change remain English.
 - Brain prompt context now keeps full detail for the target page and compresses neighboring pages, reducing the measured `群论笔记4.1` Brain prompt characters by about 25% before another real API rerun.
@@ -139,3 +182,4 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 - If schema names, output layout or report fields change, update architecture docs and tests together.
 - If a real API smoke reveals a quality issue, summarize it in `docs/changelog.md` and keep detailed diagnostics in `run_report.json`, not Markdown.
 - Do not read, rewrite, move or delete `markdown_output/已归档`; it is deprecated output retained by user request.
+- PaddleOCR docs are local under `docs/PaddleOCR/`; read them before changing request payloads, limits or artifact parsing.

@@ -31,11 +31,21 @@ WebUI 不替代 CLI。CLI 仍是稳定自动化入口，WebUI 只负责任务配
 - 显示页码范围、输出目录、任务名。
 - 文档类型只作为推荐预设，用户可覆盖处理模式和模型档位。
 
+### 解析页
+
+- 将“文档类型”和“处理模式”拆开，避免用户误以为二者冲突。
+- 文档类型只影响推荐预设，例如手写笔记、论文 PDF、截图小题、复杂公式图表。
+- 解析引擎单独选择：MinerU、PaddleOCR、不使用解析引擎。
+- Markdown 精修单独选择：关闭、开启 DocPage2MD Vision/Brain 精修。
+- 组合后显示中文模式名，例如“只用 MinerU”“PaddleOCR + Markdown 精修”“只用多模态”。
+- PaddleOCR 集成路线见 `docs/plans/paddleocr-integration-roadmap.md`。
+
 ### 模型页
 
 - 当前生效 Vision / Brain 模型。
 - 官方模型列表，显示 provider、模型 ID、价格、Key 状态。
 - 第三方模型管理，支持新增、编辑、删除、验证、批量导入。
+- 解析引擎模型也纳入管理：MinerU、PaddleOCR-VL-1.6、PaddleOCR-VL-1.5、PaddleOCR-VL、PP-StructureV3、PP-OCRv5。
 - API Key 环境变量检查和写入 Windows 用户环境变量。
 - 保留 `cheap / balanced / accurate` 默认档位，同时允许完全自定义。
 - 价格表支持手动刷新和后续实时刷新：DeepSeek 可抓官方文档，Qwen/百炼优先读取本地精选表并允许用户更新。
@@ -76,10 +86,11 @@ WebUI 不替代 CLI。CLI 仍是稳定自动化入口，WebUI 只负责任务配
 ### Phase 2：本地 WebUI 原型
 
 - FastAPI 启动本地服务。
-- 前端实现输入页、模型页、运行页。
+- 前端实现输入页、解析页、模型页、运行页。
 - 后端复用现有 CLI 构造和任务执行逻辑。
 - SSE/WebSocket 推送中文进度和日志。
 - 模型价格表先提供本地刷新按钮，实时刷新作为可选后台任务，不阻塞主流程。
+- 预留 PaddleOCR 异步 job 进度接入点，用真实 `totalPages/extractedPages` 驱动进度条和 ETA。
 
 ### Phase 3：结果浏览和历史任务
 

@@ -27,6 +27,36 @@ def test_mineru_precise_api_default_payload_uses_vlm_and_document_options():
     }
 
 
+def test_mineru_precise_api_payload_uses_configured_document_options():
+    config = AppConfig(
+        mineru_model_version="pipeline",
+        mineru_is_ocr=False,
+        mineru_enable_formula=False,
+        mineru_enable_table=True,
+        mineru_language="en",
+    )
+    client = MinerUClient(config, token="test-token")
+
+    payload = client._default_payload(page_ranges="2-4")
+
+    assert payload == {
+        "model_version": "pipeline",
+        "enable_formula": False,
+        "enable_table": True,
+        "language": "en",
+        "is_ocr": False,
+        "page_ranges": "2-4",
+    }
+
+
+def test_mineru_html_payload_skips_pdf_options():
+    client = MinerUClient(AppConfig(mineru_model_version="MinerU-HTML"), token="test-token")
+
+    payload = client._default_payload()
+
+    assert payload == {"model_version": "MinerU-HTML"}
+
+
 def test_mineru_batch_upload_payload_uses_file_level_page_ranges(monkeypatch, tmp_path):
     first = tmp_path / "notes.pdf"
     second = tmp_path / "slides.pptx"

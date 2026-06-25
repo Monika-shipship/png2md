@@ -11,6 +11,11 @@ DEFAULT_ENGINE_MODE = "vision_only"
 DEFAULT_DOCUMENT_TYPE = "custom"
 DEFAULT_MODEL_PROFILE = "balanced"
 DEFAULT_MINERU_MODEL_VERSION = "vlm"
+DEFAULT_MINERU_IS_OCR = True
+DEFAULT_MINERU_ENABLE_FORMULA = True
+DEFAULT_MINERU_ENABLE_TABLE = True
+DEFAULT_MINERU_LANGUAGE = "ch"
+DEFAULT_MINERU_PAGE_CHUNK_SIZE = 200
 
 DEFAULT_INPUT_FOLDER = "./doc_pages"
 DEFAULT_OUTPUT_FOLDER = "./markdown_output"
@@ -36,6 +41,10 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DASHSCOPE_API_KEY_ENV = "DASHSCOPE_API_KEY"
 DEFAULT_DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEFAULT_MINERU_API_TOKEN_ENV = "MINERU_API_TOKEN"
+DEFAULT_PADDLEOCR_API_TOKEN_ENV = "PADDLEOCR_API_TOKEN"
+DEFAULT_PADDLEOCR_BASE_URL = "https://paddleocr.aistudio-app.com"
+DEFAULT_PADDLEOCR_MODEL = "PaddleOCR-VL-1.6"
+DEFAULT_PADDLEOCR_PAGE_CHUNK_SIZE = 100
 
 # Model verification
 DEFAULT_VERIFY_LIMIT = 20
@@ -64,6 +73,26 @@ class AppConfig:
     mineru_base_url: str = "https://mineru.net"
     mineru_artifact_dir: Optional[str] = None
     mineru_page_ranges: Optional[str] = None
+    mineru_is_ocr: bool = DEFAULT_MINERU_IS_OCR
+    mineru_enable_formula: bool = DEFAULT_MINERU_ENABLE_FORMULA
+    mineru_enable_table: bool = DEFAULT_MINERU_ENABLE_TABLE
+    mineru_language: str = DEFAULT_MINERU_LANGUAGE
+    mineru_auto_split_pages: bool = False
+    mineru_page_chunk_size: int = DEFAULT_MINERU_PAGE_CHUNK_SIZE
+    layout_engine: str = "mineru"
+    refine_mode: str = "none"
+    paddleocr_api_key_env: str = DEFAULT_PADDLEOCR_API_TOKEN_ENV
+    paddleocr_base_url: str = DEFAULT_PADDLEOCR_BASE_URL
+    paddleocr_model: str = DEFAULT_PADDLEOCR_MODEL
+    paddleocr_artifact_dir: Optional[str] = None
+    paddleocr_page_chunk_size: int = DEFAULT_PADDLEOCR_PAGE_CHUNK_SIZE
+    paddleocr_doc_orientation: bool = False
+    paddleocr_doc_unwarping: bool = False
+    paddleocr_chart_recognition: bool = False
+    paddleocr_layout_detection: bool = True
+    paddleocr_formula_recognition: bool = True
+    paddleocr_table_recognition: bool = True
+    paddleocr_visualize: bool = True
     vision_input_price_per_million: Optional[float] = None
     vision_output_price_per_million: Optional[float] = None
     brain_input_price_per_million: Optional[float] = None
@@ -88,6 +117,9 @@ class AppConfig:
     list_all_models: bool = False
     refresh_models: bool = False
     verify_models: bool = False
+    refresh_providers: str = "dashscope,deepseek"
+    show_model_diff: bool = False
+    import_pricing_md: Optional[str] = None
     fix_ocr_confusion: bool = False
 
     @property

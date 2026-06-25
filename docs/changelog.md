@@ -2,9 +2,68 @@
 
 ## 2026-06-25
 
+### Added
+
+- 正式接入 PaddleOCR 主路径：
+  - 新增 `paddleocr_only` 和 `paddleocr_hybrid`。
+  - 新增 `--layout-engine mineru|paddleocr|none` 和 `--refine-mode none|docpage2md`。
+  - 新增 PaddleOCR 参数：`--paddleocr-model`、`--paddleocr-api-key-env`、`--paddleocr-base-url`、`--paddleocr-artifact-dir`、`--paddleocr-url`、`--paddleocr-page-chunk-size` 和 optional payload 开关。
+  - 默认模型为 `PaddleOCR-VL-1.6`，默认异步接口为 `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`。
+  - 本地 PDF 默认按 100 页分段，输出保留 `paddleocr_raw/`、`ir/`、`assets/`、`Slide_XX.md`、`*_FULL.md` 和 `run_report.json`。
+- 新增 PaddleOCR client / artifact / adapter / pipeline：
+  - 支持解析 `layoutParsingResults`、`prunedResult`、`ocrResults`、Markdown 图片、`outputImages` 和 `inputImage`。
+  - PaddleOCR artifact 先转换为现有 DocumentIR，再复用 renderer、validator 和 hybrid enrichment。
+  - 运行日志补充中文 PaddleOCR 阶段：提交任务、排队、解析页数、下载结果、转换 IR、精修、渲染和合并。
+- “刷新官方模型/价格”升级为 provider-aware 刷新系统：
+  - `--refresh-models`
+  - `--refresh-prices`
+  - `--providers dashscope,deepseek,openai-compatible`
+  - `--show-model-diff`
+  - `--import-pricing-md`
+  - DashScope 使用官方文档/parser，DeepSeek 使用 `/models` + 官方价格页解析，OpenAI-compatible 只自动发现模型列表且不猜价格。
+- 重构 README 为 GUI-first 用户首页：
+  - 开头直接说明项目用途、GUI 入口和从 0 开始配置流程。
+  - CLI、输入格式、模式、模型、成本、安全和排错按用户使用顺序重排。
+  - 长篇原理说明改为链接到 `docs/architecture/*`，避免 README 再变成大杂烩。
+- 新增 GUI 输入文件表：
+  - 显示文件名、后缀、大小、页数、限制状态和处理顺序。
+  - 支持添加文件、添加文件夹、删除、清空、上移/下移、打开文件、打开目录和预览占位。
+  - 旧的分号路径串保留为内部 CLI 兼容层，不再作为主要用户操作面。
+- 新增 MinerU 高级参数的 GUI/CLI 非交互能力：
+  - `--mineru-is-ocr`
+  - `--mineru-enable-formula`
+  - `--mineru-enable-table`
+  - `--mineru-language`
+  - `--auto-split-pages`
+  - `--mineru-page-chunk-size`
+- 新增本地 PDF 超页自动分段基础能力：
+  - 默认按 200 页规划 chunk，例如 `1-200`、`201-400`、`401-401`。
+  - 每段先写独立 chunk 输出目录，再合并成最终 `Slide_XX.md`、`*_FULL.md` 和 `run_report.json`。
+  - `run_report.json` 记录 `mineru.chunks` 和 `mineru.chunked_merge` 审计信息。
+- 新增统一 secrets 读取/写入层 `docpage2md_app/secrets.py`：
+  - 支持进程环境变量、本地 ignored `.env.local.json`、Windows 用户环境变量和 Windows Credential Manager。
+  - GUI Key 检查只读本机 secret，不联网；模型验证才发轻量 API 请求。
+- 模型管理 GUI 增加 Provider-first 页面：
+  - Provider：MinerU、PaddleOCR、DashScope、DeepSeek、OpenAI-compatible。
+  - 角色绑定：Vision / Brain 分别绑定到 Provider + 模型。
+  - 增加获取 API Key 链接、Key 保存位置、检查 Key 和验证模型按钮。
+- 成本 UI 改为表格，按文件显示页数、估计裁剪块、输入/输出 tokens、费用和可信度；MinerU/PaddleOCR 显示为平台额度/限制，不计入模型费用。
+- 新增 PaddleOCR 集成路线图：`docs/plans/paddleocr-integration-roadmap.md`。
+  - 已纳入 `PaddleOCR-VL-1.5`、`PaddleOCR-VL-1.6`、异步 API、`PP-StructureV3`、`PP-OCRv5` 等本地文档结论。
+  - 规划后续模式：`mineru_only`、`paddleocr_only`、`mineru_hybrid`、`paddleocr_hybrid`、`vision_only`。
+  - 规划 `tests/test-PaddleOCR/` 作为 ignored 私有真实测试目录，并要求 PaddleOCR Token 只通过 `PADDLEOCR_API_TOKEN` 或 ignored 本地文件保存。
+- 优化 Tkinter GUI 信息架构：
+  - 运行页改为左侧工作流/输入/输出并发、右侧进度/成本命令/日志/操作的工作台布局。
+  - 模型页拆成“当前配置”“候选模型”“第三方模型库”。
+  - 候选模型支持筛选，第三方模型库支持列表化管理和 OpenAI-compatible `/models` 自动发现。
+  - `hybrid` 启动前会检查 Vision/Brain 模型配置完整性、Key 环境变量和明显错误组合。
+
 ### Changed
 
 - 修复 Windows 受限目录中的写入兼容性：`write_text_atomic()` 在目录允许创建但拒绝 rename/delete 时，会降级为直接写入，并尽量清理临时文件，避免 MinerU cache/report 写入中断。
+- 修复 PaddleOCR `paddleocr_hybrid` 的置信度兼容问题：
+  - PaddleOCR adapter 现在把 `block.confidence` 写为 `0.0-1.0` 浮点数。
+  - `high/medium/low` 人类可读标签保存在 `confidence_label`，避免精修器把字符串转成 float 时失败。
 - 继续加强最终 Markdown 的数学符号规范化：
   - 单个裸 Unicode 数学符号会包成 LaTeX inline math。
   - `G→S`、`k→g→?` 这类箭头表达式会作为完整公式片段处理，避免生成重叠 `$...$`。
@@ -14,8 +73,11 @@
 
 - `python docpage2md.py --help`：通过。
 - `python -m docpage2md_app --help`：通过。
-- `python -m pytest -q`：248 passed。
+- `python -m pytest -q`：279 passed。
 - `git diff --check`：无 whitespace error，仅有 CRLF 提示。
+- Tkinter GUI 构建 smoke 通过：`DocPage2MdGui()` 能创建、刷新 idle tasks 并销毁。
+- 聚焦 GUI/CLI/MinerU/secrets 测试：54 passed。
+- 聚焦 PaddleOCR/official catalog 测试：45 passed。
 - 使用真实 `tests/群论笔记4.1.pdf` 对当前版本做全量 hybrid 验证：
   - 输出目录：`markdown_output/git_verify_20260625_final2/git_verify_4_1_final2`。
   - 11 页全量，`hybrid + balanced`，Vision `qwen3-vl-plus`，Brain `deepseek-v4-flash`。
@@ -23,6 +85,12 @@
   - `run_report.json`：`status=ok`，`engine_mode=hybrid`，`pages_ok=11/11`。
   - 49 个 crop Vision block 全部成功；Brain 11 页并行完成。
   - 最终用户 Markdown 未发现 API Key、Python traceback、`reasoning_content`、validator 诊断文本、`<details open>` 或 `> [!NOTE]`。
+- 使用真实 `tests/群论笔记4.1.pdf` 对 PaddleOCR 主路径做全量 `paddleocr_hybrid` 验证：
+  - 输出目录：`markdown_output/paddleocr_real_verify_4_1_hybrid_fixed/paddleocr_4_1_hybrid_fixed`。
+  - 11 页全量，layout `PaddleOCR-VL-1.6`，Vision `qwen3-vl-plus`，Brain `deepseek-v4-flash`。
+  - `run_report.json`：`status=ok`，`engine_mode=paddleocr_hybrid`，最终页 `ok=11/11`。
+  - Brain 阶段没有线程失败，也没有 `could not convert string to float`。
+  - 最终用户 Markdown 未发现 API Key、Python traceback、validator 文本、模型思考过程或置信度转换错误。
 
 ## 2026-06-24
 

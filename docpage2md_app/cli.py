@@ -1,5 +1,7 @@
 import argparse
 import queue
+import re
+import shutil
 import sys
 import time
 import urllib.parse
@@ -10,6 +12,14 @@ from pathlib import Path
 
 from .config import AppConfig
 from .eval import DEFAULT_EVAL_FIXTURE_DIR, DEFAULT_EVAL_OUTPUT_PATH
+from .input_inspection import (
+    MINERU_SINGLE_REQUEST_PAGE_LIMIT,
+    PADDLEOCR_LOCAL_FILE_LIMIT_BYTES,
+    PADDLEOCR_RECOMMENDED_CHUNK_PAGES,
+    build_page_chunks,
+    estimate_pdf_pages,
+    validate_mineru_model_version_for_paths,
+)
 from .model_profiles import apply_model_profile
 from .run_logger import RunLogger, safe_progress
 
@@ -40,10 +50,12 @@ def parse_args(argv=None):
     parser.add_argument("-o", "--output", type=str, default="./markdown_output", help="输出目录路径")
     parser.add_argument(
         "--engine-mode",
-        choices=["vision_only", "mineru_only", "hybrid"],
+        choices=["vision_only", "mineru_only", "hybrid", "mineru_hybrid", "paddleocr_only", "paddleocr_hybrid"],
         default="vision_only",
-        help="处理模式：vision_only=旧图片目录流程，mineru_only=MinerU 多格式解析，hybrid=MinerU layout/crop + docpage2md 后续精修",
+        help="处理模式：hybrid 兼容 mineru_hybrid；新增 paddleocr_only / paddleocr_hybrid",
     )
+    parser.add_argument("--layout-engine", choices=["mineru", "paddleocr", "none"], default=None, help="解析引擎覆盖：mineru / paddleocr / none")
+    parser.add_argument("--refine-mode", choices=["none", "docpage2md"], default=None, help="Markdown 精修策略：none 或 docpage2md")
     parser.add_argument(
         "--document-type",
         choices=["handwritten_notes", "paper_pdf", "screenshot_question", "complex_ppt", "custom"],
@@ -84,6 +96,30 @@ def parse_args(argv=None):
         default=None,
         help="MinerU 精准解析模型版本；默认使用 vlm，HTML 可显式选择 MinerU-HTML",
     )
+    parser.add_argument("--mineru-is-ocr", type=_parse_bool, default=None, help="MinerU is_ocr 参数，true/false")
+    parser.add_argument("--mineru-enable-formula", type=_parse_bool, default=None, help="MinerU enable_formula 参数，true/false")
+    parser.add_argument("--mineru-enable-table", type=_parse_bool, default=None, help="MinerU enable_table 参数，true/false")
+    parser.add_argument("--mineru-language", type=str, default=None, help="MinerU language 参数，默认 ch")
+    parser.add_argument("--auto-split-pages", action="store_true", help="本地 PDF 超过单次页数限制时自动按页码分段提交 MinerU")
+    parser.add_argument(
+        "--mineru-page-chunk-size",
+        type=int,
+        default=MINERU_SINGLE_REQUEST_PAGE_LIMIT,
+        help=f"MinerU 自动分段页数，默认 {MINERU_SINGLE_REQUEST_PAGE_LIMIT}",
+    )
+    parser.add_argument("--paddleocr-url", type=str, default=None, help="通过 PaddleOCR 异步 API 解析的远程文件 URL")
+    parser.add_argument("--paddleocr-artifact-dir", type=str, default=None, help="已存在的 PaddleOCR artifact 目录")
+    parser.add_argument("--paddleocr-model", type=str, default=None, help="PaddleOCR 模型，默认 PaddleOCR-VL-1.6")
+    parser.add_argument("--paddleocr-api-key-env", type=str, default=None, help="PaddleOCR Token 环境变量名，默认 PADDLEOCR_API_TOKEN")
+    parser.add_argument("--paddleocr-base-url", type=str, default=None, help="PaddleOCR Base URL，默认 https://paddleocr.aistudio-app.com")
+    parser.add_argument("--paddleocr-page-chunk-size", type=int, default=PADDLEOCR_RECOMMENDED_CHUNK_PAGES, help="PaddleOCR PDF 自动分段页数，默认 100")
+    parser.add_argument("--paddleocr-doc-orientation", type=_parse_bool, default=None, help="PaddleOCR 文档方向矫正 true/false")
+    parser.add_argument("--paddleocr-doc-unwarping", type=_parse_bool, default=None, help="PaddleOCR 扭曲矫正 true/false")
+    parser.add_argument("--paddleocr-chart-recognition", type=_parse_bool, default=None, help="PaddleOCR 图表识别 true/false")
+    parser.add_argument("--paddleocr-layout-detection", type=_parse_bool, default=None, help="PaddleOCR 版面检测 true/false")
+    parser.add_argument("--paddleocr-formula-recognition", type=_parse_bool, default=None, help="PaddleOCR 公式识别 true/false")
+    parser.add_argument("--paddleocr-table-recognition", type=_parse_bool, default=None, help="PaddleOCR 表格识别 true/false")
+    parser.add_argument("--paddleocr-visualize", type=_parse_bool, default=None, help="PaddleOCR 返回可视化图片 true/false")
     parser.add_argument(
         "--eval-fixtures",
         nargs="?",
@@ -106,7 +142,11 @@ def parse_args(argv=None):
     # 模型目录管理
     parser.add_argument("--list-models", action="store_true", help="列出可用模型，然后退出")
     parser.add_argument("--list-all-models", action="store_true", help="列出完整缓存模型目录（包含未验证候选）")
-    parser.add_argument("--refresh-models", action="store_true", help="从阿里云文档刷新候选模型列表并缓存")
+    parser.add_argument("--refresh-models", action="store_true", help="从官方文档/API 刷新候选模型列表并缓存")
+    parser.add_argument("--refresh-prices", action="store_true", help="刷新官方价格并合并模型缓存")
+    parser.add_argument("--show-model-diff", action="store_true", help="显示本次官方模型/价格刷新和旧缓存的差异")
+    parser.add_argument("--providers", type=str, default="dashscope,deepseek", help="刷新 Provider 列表，例如 dashscope,deepseek,openai-compatible")
+    parser.add_argument("--import-pricing-md", type=str, default=None, help="导入官方复制 Markdown/本地价格文档作为价格来源")
     parser.add_argument("--verify-models", action="store_true", help="用 API 验证模型可用性（需要 DASHSCOPE_API_KEY）")
     parser.add_argument("--region", type=str, default="cn-beijing", help="阿里云地域（默认 cn-beijing）")
     parser.add_argument("--base-url", type=str,
@@ -139,15 +179,38 @@ def ensure_dependencies():
 def build_config(args):
     vision_workers = _positive_optional_int(args.vision_workers, "--vision-workers") or AppConfig().vision_batch_workers
     brain_workers = _positive_optional_int(args.brain_workers, "--brain-workers") or AppConfig().brain_batch_workers
+    engine_mode, layout_engine, refine_mode = _resolve_workflow(args)
     config = AppConfig(
         session_name=args.name,
         output_folder=str(Path(args.output).resolve()),
-        engine_mode=args.engine_mode,
+        engine_mode=engine_mode,
+        layout_engine=layout_engine,
+        refine_mode=refine_mode,
         document_type=args.document_type,
         model_profile=args.model_profile,
         mineru_artifact_dir=args.mineru_artifact_dir,
         mineru_page_ranges=args.page_ranges,
         mineru_model_version=args.mineru_model_version or AppConfig().mineru_model_version,
+        mineru_is_ocr=AppConfig().mineru_is_ocr if args.mineru_is_ocr is None else args.mineru_is_ocr,
+        mineru_enable_formula=AppConfig().mineru_enable_formula if args.mineru_enable_formula is None else args.mineru_enable_formula,
+        mineru_enable_table=AppConfig().mineru_enable_table if args.mineru_enable_table is None else args.mineru_enable_table,
+        mineru_language=args.mineru_language or AppConfig().mineru_language,
+        mineru_auto_split_pages=args.auto_split_pages,
+        mineru_page_chunk_size=_positive_optional_int(args.mineru_page_chunk_size, "--mineru-page-chunk-size")
+        or AppConfig().mineru_page_chunk_size,
+        paddleocr_artifact_dir=args.paddleocr_artifact_dir,
+        paddleocr_model=args.paddleocr_model or AppConfig().paddleocr_model,
+        paddleocr_api_key_env=args.paddleocr_api_key_env or AppConfig().paddleocr_api_key_env,
+        paddleocr_base_url=args.paddleocr_base_url or AppConfig().paddleocr_base_url,
+        paddleocr_page_chunk_size=_positive_optional_int(args.paddleocr_page_chunk_size, "--paddleocr-page-chunk-size")
+        or AppConfig().paddleocr_page_chunk_size,
+        paddleocr_doc_orientation=AppConfig().paddleocr_doc_orientation if args.paddleocr_doc_orientation is None else args.paddleocr_doc_orientation,
+        paddleocr_doc_unwarping=AppConfig().paddleocr_doc_unwarping if args.paddleocr_doc_unwarping is None else args.paddleocr_doc_unwarping,
+        paddleocr_chart_recognition=AppConfig().paddleocr_chart_recognition if args.paddleocr_chart_recognition is None else args.paddleocr_chart_recognition,
+        paddleocr_layout_detection=AppConfig().paddleocr_layout_detection if args.paddleocr_layout_detection is None else args.paddleocr_layout_detection,
+        paddleocr_formula_recognition=AppConfig().paddleocr_formula_recognition if args.paddleocr_formula_recognition is None else args.paddleocr_formula_recognition,
+        paddleocr_table_recognition=AppConfig().paddleocr_table_recognition if args.paddleocr_table_recognition is None else args.paddleocr_table_recognition,
+        paddleocr_visualize=AppConfig().paddleocr_visualize if args.paddleocr_visualize is None else args.paddleocr_visualize,
         region=args.region,
         openai_base_url=args.base_url,
         model_cache_path=args.model_cache,
@@ -157,12 +220,52 @@ def build_config(args):
         brain_batch_workers=brain_workers,
         list_models=args.list_models,
         list_all_models=args.list_all_models,
-        refresh_models=args.refresh_models,
+        refresh_models=args.refresh_models or args.refresh_prices or bool(args.import_pricing_md),
         verify_models=args.verify_models,
+        refresh_providers=args.providers,
+        show_model_diff=args.show_model_diff,
+        import_pricing_md=args.import_pricing_md,
         fix_ocr_confusion=args.fix_ocr_confusion,
     )
     config = apply_model_profile(config, args.model_profile)
     return _apply_explicit_model_overrides(config, args)
+
+
+def _resolve_workflow(args) -> tuple[str, str, str]:
+    engine_mode = args.engine_mode
+    if engine_mode == "hybrid":
+        layout_engine = "mineru"
+        refine_mode = "docpage2md"
+    elif engine_mode == "mineru_hybrid":
+        layout_engine = "mineru"
+        refine_mode = "docpage2md"
+    elif engine_mode == "mineru_only":
+        layout_engine = "mineru"
+        refine_mode = "none"
+    elif engine_mode == "paddleocr_hybrid":
+        layout_engine = "paddleocr"
+        refine_mode = "docpage2md"
+    elif engine_mode == "paddleocr_only":
+        layout_engine = "paddleocr"
+        refine_mode = "none"
+    else:
+        layout_engine = "none"
+        refine_mode = "docpage2md"
+
+    if args.layout_engine:
+        layout_engine = args.layout_engine
+    if args.refine_mode:
+        refine_mode = args.refine_mode
+    if layout_engine == "mineru":
+        if refine_mode == "docpage2md":
+            engine_mode = "mineru_hybrid" if args.engine_mode == "mineru_hybrid" else "hybrid"
+        else:
+            engine_mode = "mineru_only"
+    elif layout_engine == "paddleocr":
+        engine_mode = "paddleocr_hybrid" if refine_mode == "docpage2md" else "paddleocr_only"
+    else:
+        engine_mode = "vision_only"
+    return engine_mode, layout_engine, refine_mode
 
 
 def _positive_optional_int(value: int | None, label: str) -> int | None:
@@ -171,6 +274,15 @@ def _positive_optional_int(value: int | None, label: str) -> int | None:
     if value < 1:
         raise ValueError(f"{label} must be a positive integer.")
     return value
+
+
+def _parse_bool(value: str) -> bool:
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true/false")
 
 
 def _apply_explicit_model_overrides(config: AppConfig, args) -> AppConfig:
@@ -206,30 +318,26 @@ def _handle_model_commands(console, config: AppConfig):
     from rich.panel import Panel
     from rich.table import Table
 
-    from .aliyun_catalog import (
-        fetch_model_ids_from_docs,
-        records_to_cache_dict,
-        save_cache,
-        verify_models,
-    )
+    from .aliyun_catalog import records_to_cache_dict, save_cache, verify_models
     from .env import get_dashscope_api_key
     from .model_catalog import load_model_catalog, static_to_records
+    from .official_catalog import refresh_official_catalog
 
     # Step 1: 刷新（联网抓取文档）
     if config.refresh_models:
-        console.print("[bold cyan]🔍 正在从阿里云文档抓取候选模型 ...[/]")
-        dynamic = fetch_model_ids_from_docs()
-        console.print(f"   从文档提取到 {len(dynamic)} 个候选模型")
-
-        # 写入缓存
-        cache_data = records_to_cache_dict(
-            dynamic,
-            source_urls=[],  # 由 fetch 内部记录
+        providers = [item.strip() for item in str(config.refresh_providers or "").split(",") if item.strip()]
+        console.print("[bold cyan]🔍 正在刷新官方模型/价格 ...[/]")
+        result = refresh_official_catalog(
+            providers=providers or ["dashscope", "deepseek"],
+            cache_path=config.model_cache_path,
             region=config.region,
             base_url=config.openai_base_url,
+            import_pricing_md=config.import_pricing_md,
         )
-        save_cache(config.model_cache_path, cache_data)
-        console.print(f"   [green]✅ 缓存已写入 {config.model_cache_abs_path}[/]")
+        console.print(f"   [green]✅ {result.summary_text()}[/]")
+        console.print(f"   缓存已写入 {config.model_cache_abs_path}")
+        if config.show_model_diff:
+            _display_model_diff(console, result.diff, result.errors)
 
     # Step 2: 验证
     if config.verify_models:
@@ -336,6 +444,22 @@ def _display_models_table(console, records, max_rows=120):
         console.print("[dim]完整目录保存在模型缓存 JSON 中；交互 UI 默认只使用精选目录。[/]")
 
 
+def _display_model_diff(console, diff: dict, errors: list[dict]) -> None:
+    from rich.table import Table
+
+    table = Table(title="官方模型/价格刷新差异", show_header=True, header_style="bold cyan")
+    table.add_column("类型", width=12)
+    table.add_column("内容", width=72)
+    for key, label in (("added", "新增"), ("removed", "消失")):
+        for item in diff.get(key) or []:
+            table.add_row(label, str(item))
+    for item in diff.get("price_changed") or []:
+        table.add_row("价格变化", f"{item.get('model')}: {item.get('before')} -> {item.get('after')}")
+    for item in errors:
+        table.add_row("错误", f"{item.get('provider')} {item.get('stage')}: {item.get('error')}")
+    console.print(table)
+
+
 def main(argv=None):
     configure_stdio()
     args = parse_args(argv)
@@ -353,6 +477,8 @@ def main(argv=None):
     config = build_config(args)
     args = _maybe_prompt_initial_mode(args)
     config = build_config(args)
+    if _is_paddleocr_cli_mode(args):
+        return _run_paddleocr_cli(args, config)
     if _is_mineru_cli_mode(args):
         return _run_mineru_cli(args, config)
 
@@ -382,7 +508,13 @@ def main(argv=None):
     console = Console()
 
     # ── 模型目录管理模式 ──
-    any_model_cmd = config.list_models or config.list_all_models or config.refresh_models or config.verify_models
+    any_model_cmd = (
+        config.list_models
+        or config.list_all_models
+        or config.refresh_models
+        or config.verify_models
+        or args.show_model_diff
+    )
     if any_model_cmd:
         _handle_model_commands(console, config)
         return 0
@@ -495,21 +627,62 @@ def main(argv=None):
 
 
 def _is_mineru_cli_mode(args) -> bool:
+    if _args_layout_engine(args) == "paddleocr" or args.paddleocr_artifact_dir or args.paddleocr_url:
+        return False
     return bool(
         args.mineru_artifact_dir
         or args.mineru_url
-        or args.input_files
-        or args.input_folder
-        or (args.input_file and args.engine_mode in {"mineru_only", "hybrid"})
+        or (args.input_files and _args_layout_engine(args) == "mineru")
+        or (args.input_folder and _args_layout_engine(args) == "mineru")
+        or (args.input_file and _args_layout_engine(args) == "mineru")
     )
+
+
+def _is_paddleocr_cli_mode(args) -> bool:
+    return bool(
+        args.paddleocr_artifact_dir
+        or args.paddleocr_url
+        or (args.input_files and _args_layout_engine(args) == "paddleocr")
+        or (args.input_folder and _args_layout_engine(args) == "paddleocr")
+        or (args.input_file and _args_layout_engine(args) == "paddleocr")
+    )
+
+
+def _args_layout_engine(args) -> str:
+    if args.layout_engine:
+        return args.layout_engine
+    if args.engine_mode in {"paddleocr_only", "paddleocr_hybrid"}:
+        return "paddleocr"
+    if args.engine_mode in {"mineru_only", "hybrid", "mineru_hybrid"}:
+        return "mineru"
+    return "none"
 
 
 def _maybe_prompt_initial_mode(args):
     if not sys.stdin.isatty():
         return args
-    if args.mineru_artifact_dir or args.mineru_url or args.input_file or args.input_files or args.input_folder:
+    if (
+        args.mineru_artifact_dir
+        or args.mineru_url
+        or args.paddleocr_artifact_dir
+        or args.paddleocr_url
+        or args.input_file
+        or args.input_files
+        or args.input_folder
+    ):
         return args
-    if args.engine_mode != "vision_only" or args.list_models or args.list_all_models or args.refresh_models or args.verify_models:
+    if (
+        args.engine_mode != "vision_only"
+        or args.layout_engine
+        or args.refine_mode
+        or args.list_models
+        or args.list_all_models
+        or args.refresh_models
+        or args.refresh_prices
+        or args.show_model_diff
+        or args.import_pricing_md
+        or args.verify_models
+    ):
         return args
 
     print("\n处理模式选择")
@@ -572,7 +745,7 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
     from .mineru_client import MinerUError, MinerUClient
     from .mineru_pipeline import process_mineru_artifact_task
 
-    mode = args.engine_mode if args.engine_mode in {"mineru_only", "hybrid"} else "mineru_only"
+    mode = config.engine_mode if config.engine_mode in {"mineru_only", "hybrid", "mineru_hybrid"} else "mineru_only"
     config = replace(config, engine_mode=mode)
     doc_name = None if args.name == "default" else args.name
     run_logger = RunLogger(_mineru_process_log_path(config, args, doc_name), echo=True)
@@ -593,17 +766,22 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
     )
 
     if args.mineru_artifact_dir:
-        safe_progress(run_logger, f"Processing existing MinerU artifact: {args.mineru_artifact_dir}")
-        result = process_mineru_artifact_task(
-            args.mineru_artifact_dir,
-            config,
-            doc_name=doc_name,
-            engine_mode=mode,
-            source_path=args.input_file,
-            progress=run_logger,
-        )
-        print(f"MinerU artifact 处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
-        return 0
+        try:
+            safe_progress(run_logger, f"Processing existing MinerU artifact: {args.mineru_artifact_dir}")
+            result = process_mineru_artifact_task(
+                args.mineru_artifact_dir,
+                config,
+                doc_name=doc_name,
+                engine_mode=mode,
+                source_path=args.input_file,
+                progress=run_logger,
+            )
+            print(f"MinerU artifact 处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
+            return 0
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            safe_progress(run_logger, f"MinerU artifact failed: {exc}")
+            print(f"MinerU artifact 处理失败：{exc}")
+            return 1
 
     try:
         local_files = _resolve_mineru_local_files(args)
@@ -614,6 +792,12 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
     if not args.mineru_url and not local_files:
         print("MinerU 主流程缺少输入来源：请指定 --mineru-artifact-dir、--mineru-url、--input-file、--input-files 或 --input-folder。")
         return 2
+    if local_files:
+        try:
+            validate_mineru_model_version_for_paths(local_files, config.mineru_model_version)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
     try:
         client = MinerUClient(config, progress=run_logger)
 
@@ -636,6 +820,19 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
             )
             print(f"MinerU API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
             return 0
+
+        split_plans = _auto_split_plans_for_local_files(local_files, args, config)
+        if split_plans:
+            return _run_mixed_mineru_local_files(
+                client,
+                local_files,
+                split_plans,
+                args=args,
+                config=config,
+                mode=mode,
+                doc_name=doc_name,
+                progress=run_logger,
+            )
 
         safe_progress(
             run_logger,
@@ -668,6 +865,637 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
         safe_progress(run_logger, f"MinerU API failed: {exc}")
         print(f"MinerU API 失败：{exc}")
         return 1
+
+
+def _run_paddleocr_cli(args, config: AppConfig) -> int:
+    from .paddleocr_client import PaddleOCRError, PaddleOCRClient
+    from .paddleocr_pipeline import process_paddleocr_artifact_task
+
+    mode = config.engine_mode if config.engine_mode in {"paddleocr_only", "paddleocr_hybrid"} else "paddleocr_only"
+    config = replace(config, engine_mode=mode)
+    doc_name = None if args.name == "default" else args.name
+    run_logger = RunLogger(_paddleocr_process_log_path(config, args, doc_name), echo=True)
+    safe_progress(
+        run_logger,
+        (
+            f"PaddleOCR mode start: mode={mode}, model={config.paddleocr_model}, "
+            f"page_ranges={args.page_ranges or 'all'}, token_env={config.paddleocr_api_key_env}"
+        ),
+    )
+    safe_progress(
+        run_logger,
+        (
+            f"Models: vision={config.vision_provider}:{config.model_vision} "
+            f"brain={config.brain_provider}:{config.model_brain}"
+        ),
+    )
+
+    if args.paddleocr_artifact_dir:
+        try:
+            safe_progress(run_logger, f"Processing existing PaddleOCR artifact: {args.paddleocr_artifact_dir}")
+            result = process_paddleocr_artifact_task(
+                args.paddleocr_artifact_dir,
+                config,
+                doc_name=doc_name,
+                engine_mode=mode,
+                source_path=args.input_file,
+                progress=run_logger,
+            )
+            safe_progress(run_logger, f"PaddleOCR artifact processed: {result['page_count']} pages -> {result['output_dir']}")
+            print(f"PaddleOCR artifact 处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
+            return 0
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            safe_progress(run_logger, f"PaddleOCR artifact failed: {exc}")
+            print(f"PaddleOCR artifact 处理失败：{exc}")
+            return 1
+
+    try:
+        local_files = _resolve_paddleocr_local_files(args)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+
+    if not args.paddleocr_url and not local_files:
+        print("PaddleOCR 主流程缺少输入来源：请指定 --paddleocr-artifact-dir、--paddleocr-url、--input-file、--input-files 或 --input-folder。")
+        return 2
+
+    try:
+        client = PaddleOCRClient(config, progress=run_logger)
+        if args.paddleocr_url:
+            safe_progress(run_logger, f"Submitting remote URL to PaddleOCR: {_safe_source_label(args.paddleocr_url)}")
+            job_id = client.submit_url(args.paddleocr_url, page_ranges=args.page_ranges)
+            safe_progress(run_logger, f"PaddleOCR task submitted: job_id={job_id}")
+            status = client.wait_for_job(job_id)
+            processed = _download_and_process_paddleocr_result(
+                client,
+                status,
+                source=args.paddleocr_url,
+                config=config,
+                args=args,
+                mode=mode,
+                doc_name=doc_name,
+                page_ranges=args.page_ranges,
+                progress=run_logger,
+            )
+            safe_progress(run_logger, f"PaddleOCR API processed: {processed['page_count']} pages -> {processed['output_dir']}")
+            print(f"PaddleOCR API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
+            return 0
+
+        split_plans = _auto_split_paddleocr_plans_for_local_files(local_files, args, config, progress=run_logger)
+        if split_plans:
+            return _run_mixed_paddleocr_local_files(
+                client,
+                local_files,
+                split_plans,
+                args=args,
+                config=config,
+                mode=mode,
+                doc_name=doc_name,
+                progress=run_logger,
+            )
+
+        processed_count = 0
+        for source in local_files:
+            _validate_paddleocr_size(source)
+            safe_progress(run_logger, f"Submitting local file to PaddleOCR: {source.name} ({source.stat().st_size} bytes)")
+            job_id = client.submit_local_file(source, page_ranges=args.page_ranges)
+            safe_progress(run_logger, f"PaddleOCR task submitted: job_id={job_id}, file={source.name}")
+            status = client.wait_for_job(job_id)
+            processed = _download_and_process_paddleocr_result(
+                client,
+                status,
+                source=str(source),
+                config=config,
+                args=args,
+                mode=mode,
+                doc_name=doc_name if len(local_files) == 1 else None,
+                page_ranges=args.page_ranges,
+                progress=run_logger,
+            )
+            processed_count += 1
+            safe_progress(run_logger, f"PaddleOCR API processed: {processed['page_count']} pages -> {processed['output_dir']}")
+            print(f"PaddleOCR API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
+        safe_progress(run_logger, f"PaddleOCR local batch complete: {processed_count}/{len(local_files)} files")
+        print(f"PaddleOCR 本地任务完成：{processed_count}/{len(local_files)} 个文件")
+        return 0
+    except (PaddleOCRError, ValueError, OSError) as exc:
+        safe_progress(run_logger, f"PaddleOCR API failed: {exc}")
+        print(f"PaddleOCR API 失败：{exc}")
+        return 1
+
+
+def _auto_split_paddleocr_plans_for_local_files(local_files: list[Path], args, config: AppConfig, *, progress=None) -> dict[Path, list]:
+    plans: dict[Path, list] = {}
+    for source in local_files:
+        if source.suffix.lower() != ".pdf":
+            continue
+        total_pages = estimate_pdf_pages(source)
+        if not total_pages:
+            safe_progress(progress, f"PaddleOCR PDF page count unknown: {source.name}")
+            continue
+        chunks = build_page_chunks(total_pages, args.page_ranges or "", chunk_size=config.paddleocr_page_chunk_size)
+        if len(chunks) > 1:
+            plans[source] = chunks
+    return plans
+
+
+def _run_mixed_paddleocr_local_files(
+    client,
+    local_files: list[Path],
+    split_plans: dict[Path, list],
+    *,
+    args,
+    config: AppConfig,
+    mode: str,
+    doc_name: str | None,
+    progress,
+) -> int:
+    processed_count = 0
+    safe_progress(
+        progress,
+        (
+            f"PaddleOCR mixed local processing start: files={len(local_files)}, "
+            f"chunked_files={len(split_plans)}"
+        ),
+    )
+    for source in local_files:
+        _validate_paddleocr_size(source)
+        if source in split_plans:
+            code = _run_chunked_paddleocr_pdf(
+                client,
+                source,
+                split_plans[source],
+                args=args,
+                config=config,
+                mode=mode,
+                doc_name=doc_name if len(local_files) == 1 else None,
+                progress=progress,
+            )
+            if code != 0:
+                return code
+            processed_count += 1
+            continue
+        safe_progress(progress, f"Submitting one local file to PaddleOCR: {source.name} ({source.stat().st_size} bytes)")
+        job_id = client.submit_local_file(source, page_ranges=args.page_ranges)
+        safe_progress(progress, f"PaddleOCR task submitted: job_id={job_id}, file={source.name}")
+        status = client.wait_for_job(job_id)
+        processed = _download_and_process_paddleocr_result(
+            client,
+            status,
+            source=str(source),
+            config=config,
+            args=args,
+            mode=mode,
+            doc_name=doc_name if len(local_files) == 1 else None,
+            page_ranges=args.page_ranges,
+            progress=progress,
+        )
+        processed_count += 1
+        safe_progress(progress, f"PaddleOCR API processed: {processed['page_count']} pages -> {processed['output_dir']}")
+        print(f"PaddleOCR API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
+    safe_progress(progress, f"PaddleOCR local batch complete: {processed_count}/{len(local_files)} files")
+    print(f"PaddleOCR 本地任务完成：{processed_count}/{len(local_files)} 个文件")
+    return 0
+
+
+def _run_chunked_paddleocr_pdf(
+    client,
+    source: Path,
+    chunks,
+    *,
+    args,
+    config: AppConfig,
+    mode: str,
+    doc_name: str | None,
+    progress,
+) -> int:
+    from .files import merge_markdowns, read_json, write_json
+
+    output_name = doc_name or source.stem
+    output_dir = Path(config.output_folder) / output_name
+    total_pages = sum(chunk.page_count for chunk in chunks)
+    safe_progress(
+        progress,
+        (
+            f"PaddleOCR chunked PDF start: source={source.name}, chunks={len(chunks)}, "
+            f"selected_pages={total_pages}, chunk_size={config.paddleocr_page_chunk_size}"
+        ),
+    )
+    chunk_audit: list[dict] = []
+    for chunk in chunks:
+        chunk_doc_name = f"{output_name}__chunk_{chunk.index:03d}"
+        safe_progress(
+            progress,
+            (
+                f"PaddleOCR chunk {chunk.index}/{len(chunks)} submit: "
+                f"page_ranges={chunk.page_ranges}, pages={chunk.page_count}"
+            ),
+        )
+        job_id = client.submit_local_file(source, page_ranges=chunk.page_ranges)
+        safe_progress(progress, f"PaddleOCR chunk submitted: chunk={chunk.index}, job_id={job_id}")
+        status = client.wait_for_job(job_id)
+        processed = _download_and_process_paddleocr_result(
+            client,
+            status,
+            source=str(source),
+            config=config,
+            args=args,
+            mode=mode,
+            doc_name=chunk_doc_name,
+            page_ranges=chunk.page_ranges,
+            progress=progress,
+        )
+        chunk_audit.append(
+            {
+                "index": chunk.index,
+                "page_ranges": chunk.page_ranges,
+                "page_count": chunk.page_count,
+                "first_page": chunk.first_page,
+                "last_page": chunk.last_page,
+                "job_id": job_id,
+                "output_dir": processed.get("output_dir"),
+                "status": processed.get("status"),
+            }
+        )
+        safe_progress(progress, f"PaddleOCR chunk processed: chunk={chunk.index}/{len(chunks)}, pages={processed.get('page_count')}")
+
+    safe_progress(progress, "PaddleOCR chunked merge start: combining chunk outputs into final document")
+    _merge_paddleocr_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress)
+    merge_markdowns(output_dir, output_name)
+    report_path = output_dir / "run_report.json"
+    if report_path.exists():
+        report = read_json(report_path)
+        report.setdefault("paddleocr", {})
+        report["paddleocr"]["chunks"] = chunk_audit
+        report["paddleocr"]["chunked_merge"] = {
+            "enabled": True,
+            "chunk_count": len(chunks),
+            "selected_page_count": total_pages,
+            "chunk_size": config.paddleocr_page_chunk_size,
+            "merged_full_markdown": str(output_dir / f"{output_name}_FULL.md"),
+        }
+        write_json(report_path, report)
+        safe_progress(progress, f"PaddleOCR chunk audit written: {report_path}")
+    print(f"PaddleOCR 分段任务完成：{len(chunks)} 段，约 {total_pages} 页 -> {output_dir}")
+    safe_progress(progress, f"PaddleOCR API processed: {total_pages} pages -> {output_dir}")
+    return 0
+
+
+def _merge_paddleocr_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress) -> None:
+    from .files import natural_sort_key, read_json, write_json, write_text_atomic
+    from .reporting import finalize_run_report
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "assets").mkdir(parents=True, exist_ok=True)
+    (output_dir / "ir").mkdir(parents=True, exist_ok=True)
+    (output_dir / "paddleocr_raw").mkdir(parents=True, exist_ok=True)
+    first_report: dict | None = None
+    merged_pages: list[dict] = []
+    copied_slide_numbers: list[int] = []
+    chunk_by_index = {chunk.index: chunk for chunk in chunks}
+    for audit in chunk_audit:
+        index = int(audit["index"])
+        chunk = chunk_by_index[index]
+        chunk_dir = Path(str(audit.get("output_dir") or ""))
+        if not chunk_dir.exists():
+            continue
+        chunk_asset_prefix = f"chunk_{index:03d}"
+        _copy_chunk_subdir(chunk_dir / "assets", output_dir / "assets" / chunk_asset_prefix)
+        _copy_chunk_subdir(chunk_dir / "paddleocr_raw", output_dir / "paddleocr_raw" / chunk_asset_prefix)
+        _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
+        chunk_report = read_json(chunk_dir / "run_report.json") if (chunk_dir / "run_report.json").exists() else {}
+        if first_report is None and chunk_report:
+            first_report = chunk_report
+        for slide_path in sorted(chunk_dir.glob("Slide_*.md"), key=natural_sort_key):
+            match = re.match(r"Slide_(\d+)\.md$", slide_path.name)
+            if not match:
+                continue
+            source_slide = int(match.group(1))
+            final_slide = _final_slide_no_for_chunk_slide(chunk, source_slide)
+            markdown = _rewrite_chunk_markdown(slide_path.read_text(encoding="utf-8"), final_slide, chunk_asset_prefix)
+            write_text_atomic(output_dir / f"Slide_{final_slide:02d}.md", markdown)
+            meta_path = chunk_dir / f"Slide_{source_slide:02d}.meta.json"
+            if meta_path.exists():
+                meta = read_json(meta_path)
+                meta["slide_no"] = final_slide
+                write_json(output_dir / f"Slide_{final_slide:02d}.meta.json", meta)
+            copied_slide_numbers.append(final_slide)
+        for page in chunk_report.get("pages") or []:
+            page = dict(page)
+            source_slide = int(page.get("slide_no") or 0)
+            if source_slide:
+                final_slide = _final_slide_no_for_chunk_slide(chunk, source_slide)
+                page["slide_no"] = final_slide
+                final = dict(page.get("final") or {})
+                final["path"] = str(output_dir / f"Slide_{final_slide:02d}.md")
+                final["included_in_full"] = True
+                page["final"] = final
+            merged_pages.append(page)
+    if first_report is None:
+        return
+    report = dict(first_report)
+    report["doc_name"] = output_name
+    report["pages"] = sorted(merged_pages, key=lambda page: int(page.get("slide_no") or 0))
+    report["paddleocr"] = dict(report.get("paddleocr") or {})
+    report["paddleocr"]["chunked_merge"] = {
+        "enabled": True,
+        "copied_slides": sorted(set(copied_slide_numbers)),
+    }
+    finalize_run_report(report)
+    write_json(output_dir / "run_report.json", report)
+    safe_progress(progress, f"PaddleOCR chunked merge copied slides: count={len(set(copied_slide_numbers))}")
+
+
+def _download_and_process_paddleocr_result(
+    client,
+    status,
+    *,
+    source: str,
+    config: AppConfig,
+    args,
+    mode: str,
+    doc_name: str | None,
+    page_ranges: str | None,
+    progress=None,
+) -> dict:
+    from .paddleocr_cache import cache_key_for_source, task_cache_dir, write_task_manifest
+    from .paddleocr_pipeline import process_paddleocr_artifact_task
+
+    progress = _per_paddleocr_document_progress(config, args, source, doc_name, progress)
+    cache_key = cache_key_for_source(source, page_ranges=page_ranges, model=config.paddleocr_model)
+    cache_dir = task_cache_dir(config.output_folder, cache_key)
+    artifact_dir = cache_dir / "artifact"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe_progress(progress, f"Downloading PaddleOCR artifact: source={_safe_source_label(source)}, cache_key={cache_key[:12]}")
+    client.download_job_artifact(status, artifact_dir, source=source, page_ranges=page_ranges)
+    write_task_manifest(
+        artifact_dir,
+        source=source,
+        page_ranges=page_ranges,
+        model=config.paddleocr_model,
+        job_id=status.job_id,
+        trace_id=status.trace_id,
+    )
+    safe_progress(progress, f"Processing PaddleOCR artifact into Markdown: {artifact_dir}")
+    return process_paddleocr_artifact_task(
+        artifact_dir,
+        config,
+        doc_name=doc_name,
+        engine_mode=mode,
+        source_path=source,
+        progress=progress,
+    )
+
+
+def _auto_split_plans_for_local_files(local_files: list[Path], args, config: AppConfig) -> dict[Path, list]:
+    if not config.mineru_auto_split_pages:
+        return {}
+    plans: dict[Path, list] = {}
+    for source in local_files:
+        if source.suffix.lower() != ".pdf":
+            continue
+        total_pages = estimate_pdf_pages(source)
+        if not total_pages:
+            continue
+        chunks = build_page_chunks(total_pages, args.page_ranges or "", chunk_size=config.mineru_page_chunk_size)
+        if len(chunks) > 1:
+            plans[source] = chunks
+    return plans
+
+
+def _run_mixed_mineru_local_files(
+    client,
+    local_files: list[Path],
+    split_plans: dict[Path, list],
+    *,
+    args,
+    config: AppConfig,
+    mode: str,
+    doc_name: str | None,
+    progress,
+) -> int:
+    processed_count = 0
+    safe_progress(
+        progress,
+        (
+            f"MinerU mixed local processing start: files={len(local_files)}, "
+            f"chunked_files={len(split_plans)}"
+        ),
+    )
+    for source in local_files:
+        if source in split_plans:
+            code = _run_chunked_mineru_pdf(
+                client,
+                source,
+                split_plans[source],
+                args=args,
+                config=config,
+                mode=mode,
+                doc_name=doc_name if len(local_files) == 1 else None,
+                progress=progress,
+            )
+            if code != 0:
+                return code
+            processed_count += 1
+            continue
+        safe_progress(progress, f"Submitting one local file to MinerU: {source.name} ({source.stat().st_size} bytes)")
+        batch_id = client.submit_local_files([source], page_ranges=args.page_ranges)
+        safe_progress(progress, f"MinerU batch submitted: batch_id={batch_id}, files=1")
+        results = client.wait_for_batch_results(batch_id, expected_count=1)
+        result = results[0]
+        processed = _download_and_process_mineru_result(
+            client,
+            result,
+            source=str(source),
+            config=config,
+            args=args,
+            mode=mode,
+            doc_name=doc_name if len(local_files) == 1 else None,
+            task_ref={"task_id": result.task_id, "batch_id": batch_id},
+            progress=progress,
+        )
+        processed_count += 1
+        print(f"MinerU API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
+    print(f"MinerU 本地任务完成：{processed_count}/{len(local_files)} 个文件")
+    return 0
+
+
+def _run_chunked_mineru_pdf(
+    client,
+    source: Path,
+    chunks,
+    *,
+    args,
+    config: AppConfig,
+    mode: str,
+    doc_name: str | None,
+    progress,
+) -> int:
+    from .files import merge_markdowns, read_json, write_json
+
+    output_name = doc_name or source.stem
+    output_dir = Path(config.output_folder) / output_name
+    total_pages = sum(chunk.page_count for chunk in chunks)
+    safe_progress(
+        progress,
+        (
+            f"MinerU chunked PDF start: source={source.name}, chunks={len(chunks)}, "
+            f"selected_pages={total_pages}, chunk_size={config.mineru_page_chunk_size}"
+        ),
+    )
+    chunk_audit: list[dict] = []
+    for chunk in chunks:
+        chunk_args = argparse.Namespace(**vars(args))
+        chunk_args.page_ranges = chunk.page_ranges
+        chunk_doc_name = f"{output_name}__chunk_{chunk.index:03d}"
+        safe_progress(
+            progress,
+            (
+                f"MinerU chunk {chunk.index}/{len(chunks)} submit: "
+                f"page_ranges={chunk.page_ranges}, pages={chunk.page_count}"
+            ),
+        )
+        batch_id = client.submit_local_files([source], page_ranges=chunk.page_ranges)
+        safe_progress(progress, f"MinerU chunk batch submitted: chunk={chunk.index}, batch_id={batch_id}")
+        results = client.wait_for_batch_results(batch_id, expected_count=1)
+        result = results[0]
+        processed = _download_and_process_mineru_result(
+            client,
+            result,
+            source=str(source),
+            config=config,
+            args=chunk_args,
+            mode=mode,
+            doc_name=chunk_doc_name,
+            task_ref={"task_id": result.task_id, "batch_id": batch_id},
+            progress=progress,
+        )
+        chunk_audit.append(
+            {
+                "index": chunk.index,
+                "page_ranges": chunk.page_ranges,
+                "page_count": chunk.page_count,
+                "first_page": chunk.first_page,
+                "last_page": chunk.last_page,
+                "task_id": result.task_id,
+                "batch_id": batch_id,
+                "output_dir": processed.get("output_dir"),
+                "status": processed.get("status"),
+            }
+        )
+        safe_progress(progress, f"MinerU chunk processed: chunk={chunk.index}/{len(chunks)}, pages={processed.get('page_count')}")
+
+    safe_progress(progress, "MinerU chunked merge start: combining chunk outputs into final document")
+    _merge_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress)
+    merge_markdowns(output_dir, output_name)
+    report_path = output_dir / "run_report.json"
+    if report_path.exists():
+        report = read_json(report_path)
+        report.setdefault("mineru", {})
+        report["mineru"]["chunks"] = chunk_audit
+        report["mineru"]["chunked_merge"] = {
+            "enabled": True,
+            "chunk_count": len(chunks),
+            "selected_page_count": total_pages,
+            "chunk_size": config.mineru_page_chunk_size,
+            "merged_full_markdown": str(output_dir / f"{output_name}_FULL.md"),
+        }
+        write_json(report_path, report)
+        safe_progress(progress, f"MinerU chunk audit written: {report_path}")
+    print(f"MinerU 分段任务完成：{len(chunks)} 段，约 {total_pages} 页 -> {output_dir}")
+    return 0
+
+
+def _merge_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress) -> None:
+    from .files import natural_sort_key, read_json, write_json, write_text_atomic
+    from .reporting import finalize_run_report
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "assets").mkdir(parents=True, exist_ok=True)
+    (output_dir / "ir").mkdir(parents=True, exist_ok=True)
+    (output_dir / "mineru_raw").mkdir(parents=True, exist_ok=True)
+    first_report: dict | None = None
+    merged_pages: list[dict] = []
+    copied_slide_numbers: list[int] = []
+
+    chunk_by_index = {chunk.index: chunk for chunk in chunks}
+    for audit in chunk_audit:
+        index = int(audit["index"])
+        chunk = chunk_by_index[index]
+        chunk_dir = Path(str(audit.get("output_dir") or ""))
+        if not chunk_dir.exists():
+            continue
+        chunk_asset_prefix = f"chunk_{index:03d}"
+        _copy_chunk_subdir(chunk_dir / "assets", output_dir / "assets" / chunk_asset_prefix)
+        _copy_chunk_subdir(chunk_dir / "mineru_raw", output_dir / "mineru_raw" / chunk_asset_prefix)
+        _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
+
+        report_path = chunk_dir / "run_report.json"
+        chunk_report = read_json(report_path) if report_path.exists() else {}
+        if first_report is None and chunk_report:
+            first_report = chunk_report
+
+        for slide_path in sorted(chunk_dir.glob("Slide_*.md"), key=natural_sort_key):
+            match = re.match(r"Slide_(\d+)\.md$", slide_path.name)
+            if not match:
+                continue
+            source_slide = int(match.group(1))
+            final_slide = _final_slide_no_for_chunk_slide(chunk, source_slide)
+            markdown = slide_path.read_text(encoding="utf-8")
+            markdown = _rewrite_chunk_markdown(markdown, final_slide, chunk_asset_prefix)
+            final_slide_path = output_dir / f"Slide_{final_slide:02d}.md"
+            write_text_atomic(final_slide_path, markdown)
+            meta_path = chunk_dir / f"Slide_{source_slide:02d}.meta.json"
+            if meta_path.exists():
+                meta = read_json(meta_path)
+                meta["slide_no"] = final_slide
+                write_json(output_dir / f"Slide_{final_slide:02d}.meta.json", meta)
+            copied_slide_numbers.append(final_slide)
+
+        for page in chunk_report.get("pages") or []:
+            page = dict(page)
+            source_slide = int(page.get("slide_no") or 0)
+            if source_slide:
+                final_slide = _final_slide_no_for_chunk_slide(chunk, source_slide)
+                page["slide_no"] = final_slide
+                final = dict(page.get("final") or {})
+                final["path"] = str(output_dir / f"Slide_{final_slide:02d}.md")
+                final["included_in_full"] = True
+                page["final"] = final
+            merged_pages.append(page)
+
+    if first_report is None:
+        return
+    report = dict(first_report)
+    report["doc_name"] = output_name
+    report["pages"] = sorted(merged_pages, key=lambda page: int(page.get("slide_no") or 0))
+    report["mineru"] = dict(report.get("mineru") or {})
+    report["mineru"]["chunked_merge"] = {
+        "enabled": True,
+        "copied_slides": sorted(set(copied_slide_numbers)),
+    }
+    finalize_run_report(report)
+    write_json(output_dir / "run_report.json", report)
+    safe_progress(progress, f"MinerU chunked merge copied slides: count={len(set(copied_slide_numbers))}")
+
+
+def _copy_chunk_subdir(source: Path, dest: Path) -> None:
+    if not source.exists():
+        return
+    shutil.copytree(source, dest, dirs_exist_ok=True)
+
+
+def _final_slide_no_for_chunk_slide(chunk, source_slide: int) -> int:
+    if chunk.first_page <= source_slide <= chunk.last_page:
+        return source_slide
+    if 1 <= source_slide <= chunk.page_count:
+        return chunk.first_page + source_slide - 1
+    return source_slide
+
+
+def _rewrite_chunk_markdown(markdown: str, final_slide: int, asset_prefix: str) -> str:
+    markdown = re.sub(r"^# Slide\s+\d+\s*$", f"# Slide {final_slide}", markdown, count=1, flags=re.MULTILINE)
+    return markdown.replace("(assets/", f"(assets/{asset_prefix}/")
 
 
 def _download_and_process_mineru_result(
@@ -734,6 +1562,21 @@ def _per_document_progress(config: AppConfig, args, source: str, doc_name: str |
     return tee
 
 
+def _per_paddleocr_document_progress(config: AppConfig, args, source: str, doc_name: str | None, progress):
+    output_name = doc_name or _source_output_name(source)
+    doc_log_path = Path(config.output_folder) / output_name / "process.log"
+    shared_log_path = _paddleocr_process_log_path(config, args, doc_name)
+    if progress is None or doc_log_path.resolve() == shared_log_path.resolve():
+        return progress
+    doc_logger = RunLogger(doc_log_path, echo=False)
+
+    def tee(message: str) -> None:
+        safe_progress(progress, message)
+        safe_progress(doc_logger, message)
+
+    return tee
+
+
 def _resolve_mineru_local_files(args) -> list[Path]:
     files: list[Path] = []
     if args.input_file:
@@ -752,6 +1595,24 @@ def _resolve_mineru_local_files(args) -> list[Path]:
     return sorted(deduped.values(), key=lambda path: str(path).lower())
 
 
+def _resolve_paddleocr_local_files(args) -> list[Path]:
+    files: list[Path] = []
+    if args.input_file:
+        files.append(_validate_explicit_paddleocr_file(args.input_file))
+    if args.input_files:
+        files.extend(_validate_explicit_paddleocr_file(item) for item in args.input_files)
+    if args.input_folder:
+        folder = Path(args.input_folder)
+        if not folder.exists() or not folder.is_dir():
+            raise ValueError(f"PaddleOCR input folder does not exist: {folder}")
+        iterator = folder.rglob("*") if args.recursive else folder.glob("*")
+        files.extend(path for path in iterator if path.is_file() and _is_paddleocr_supported_file(path))
+    deduped: dict[str, Path] = {}
+    for path in files:
+        deduped[str(path.resolve()).lower()] = path.resolve()
+    return sorted(deduped.values(), key=lambda path: str(path).lower())
+
+
 def _validate_explicit_mineru_file(path: str | Path) -> Path:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
@@ -762,8 +1623,30 @@ def _validate_explicit_mineru_file(path: str | Path) -> Path:
     return file_path.resolve()
 
 
+def _validate_explicit_paddleocr_file(path: str | Path) -> Path:
+    file_path = Path(path)
+    if not file_path.exists() or not file_path.is_file():
+        raise ValueError(f"PaddleOCR input file does not exist: {file_path}")
+    if not _is_paddleocr_supported_file(file_path):
+        raise ValueError(f"Unsupported PaddleOCR input file type: {file_path.suffix}. Supported: .pdf and common image files")
+    _validate_paddleocr_size(file_path)
+    return file_path.resolve()
+
+
 def _is_mineru_supported_file(path: Path) -> bool:
     return path.suffix.lower() in MINERU_SUPPORTED_SUFFIXES
+
+
+def _is_paddleocr_supported_file(path: Path) -> bool:
+    from .input_inspection import IMAGE_SUFFIXES
+
+    return path.suffix.lower() == ".pdf" or path.suffix.lower() in IMAGE_SUFFIXES
+
+
+def _validate_paddleocr_size(path: Path) -> None:
+    if path.exists() and path.stat().st_size > PADDLEOCR_LOCAL_FILE_LIMIT_BYTES:
+        size_mb = path.stat().st_size / (1024 * 1024)
+        raise ValueError(f"PaddleOCR 本地上传单文件限制为 50MB：{path.name} 当前约 {size_mb:.1f}MB。")
 
 
 def _match_batch_results_to_sources(results, source_files: list[Path]) -> list[Path]:
@@ -785,6 +1668,10 @@ def _mineru_process_log_path(config: AppConfig, args, doc_name: str | None) -> P
     return Path(config.output_folder) / _mineru_log_output_name(args, doc_name) / "process.log"
 
 
+def _paddleocr_process_log_path(config: AppConfig, args, doc_name: str | None) -> Path:
+    return Path(config.output_folder) / _paddleocr_log_output_name(args, doc_name) / "process.log"
+
+
 def _mineru_log_output_name(args, doc_name: str | None) -> str:
     if doc_name:
         return doc_name
@@ -801,6 +1688,24 @@ def _mineru_log_output_name(args, doc_name: str | None) -> str:
     if args.input_files:
         return "mineru_batch"
     return "mineru_task"
+
+
+def _paddleocr_log_output_name(args, doc_name: str | None) -> str:
+    if doc_name:
+        return doc_name
+    if args.input_file:
+        return Path(args.input_file).stem
+    if args.paddleocr_artifact_dir:
+        return Path(args.paddleocr_artifact_dir).name
+    if args.paddleocr_url:
+        path = urllib.parse.urlsplit(args.paddleocr_url).path
+        stem = Path(path).stem
+        return stem or "paddleocr_url_task"
+    if args.input_folder:
+        return f"{Path(args.input_folder).name}_paddleocr_batch"
+    if args.input_files:
+        return "paddleocr_batch"
+    return "paddleocr_task"
 
 
 def _source_output_name(source: str) -> str:

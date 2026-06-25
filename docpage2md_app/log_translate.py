@@ -28,6 +28,10 @@ PAGE_RENDERED_RE = re.compile(r"Page rendered: slide=(\d+), status=([^,]+)")
 RENDERING_PAGE_RE = re.compile(r"Rendering page (\d+)/(\d+): slide=(\d+), blocks=(\d+)")
 MINERU_PROCESSED_RE = re.compile(r"MinerU (?:API|artifact) processed: (\d+) pages -> (.+)")
 MINERU_BATCH_SUBMITTED_RE = re.compile(r"MinerU batch submitted: .*files=(\d+)")
+PADDLEOCR_RUNNING_RE = re.compile(r"PaddleOCR job running: job_id=([^,]+), pages=(\d+)/(\d+)")
+PADDLEOCR_DOCUMENT_READY_RE = re.compile(r"PaddleOCR DocumentIR ready: pages=(\d+), blocks=(\d+)")
+PADDLEOCR_RENDERING_PAGE_RE = re.compile(r"Rendering PaddleOCR page (\d+)/(\d+): slide=(\d+), blocks=(\d+)")
+PADDLEOCR_PAGE_RENDERED_RE = re.compile(r"PaddleOCR page rendered: slide=(\d+), status=([^,]+)")
 
 ZH_DOCUMENT_READY_RE = re.compile(r"文档结构已就绪：共\s*(\d+)\s*页")
 ZH_HYBRID_PAGE_START_RE = re.compile(r"准备第\s*(\d+)/(\d+)\s*页精修")
@@ -39,10 +43,17 @@ ZH_HYBRID_PAGE_REFINER_DONE_RE = re.compile(r"校验器完成第\s*(\d+)\s*页")
 ZH_PAGE_RENDERED_RE = re.compile(r"Markdown 已生成：第\s*(\d+)\s*页，状态=([^，]+)")
 ZH_MINERU_PROCESSED_RE = re.compile(r"文件处理完成：共\s*(\d+)\s*页，输出目录=(.+)")
 ZH_MINERU_BATCH_SUBMITTED_RE = re.compile(r"MinerU 批量任务已提交：batch_id=.*文件数=(\d+)")
+ZH_PADDLEOCR_RUNNING_RE = re.compile(r"等待 PaddleOCR 解析：job_id=([^，]+)，页数=(\d+)/(\d+)")
+ZH_PADDLEOCR_DOCUMENT_READY_RE = re.compile(r"PaddleOCR 文档结构已就绪：共\s*(\d+)\s*页，块数=(\d+)")
+ZH_PADDLEOCR_RENDERING_PAGE_RE = re.compile(r"正在渲染 PaddleOCR Markdown：第\s*(\d+)/(\d+)\s*页，slide=(\d+)，块数=(\d+)")
+ZH_PADDLEOCR_PAGE_RENDERED_RE = re.compile(r"PaddleOCR Markdown 已生成：第\s*(\d+)\s*页，状态=([^，]+)")
 
 _ENGINE_MODE_LABELS = {
     "hybrid": "混合精修",
+    "mineru_hybrid": "MinerU + Markdown 精修",
     "mineru_only": "仅 MinerU 解析",
+    "paddleocr_hybrid": "PaddleOCR + Markdown 精修",
+    "paddleocr_only": "仅 PaddleOCR 解析",
     "vision_only": "纯视觉旧流程",
 }
 _MODEL_PROFILE_LABELS = {
@@ -130,6 +141,27 @@ def translate_progress_message(message: str) -> str:
         return f"等待 MinerU 解析：第 {match.group(1)} 次查询，暂未返回结果"
     if match := re.search(r"MinerU batch done: batch_id=([^,]+), files=(\d+)", message):
         return f"MinerU 批量解析完成：batch_id={match.group(1)}，文件数={match.group(2)}"
+    if match := re.search(r"MinerU mixed local processing start: files=(\d+), chunked_files=(\d+)", message):
+        return f"开始处理本地文件：文件数={match.group(1)}，需要自动分段的文件数={match.group(2)}"
+    if match := re.search(r"Submitting one local file to MinerU: (.+?) \((\d+) bytes\)", message):
+        return f"正在提交单个本地文件到 MinerU：{match.group(1)}，大小={_format_bytes(int(match.group(2)))}"
+    if match := re.search(r"MinerU chunked PDF start: source=([^,]+), chunks=(\d+), selected_pages=(\d+), chunk_size=(\d+)", message):
+        return (
+            f"开始 MinerU 自动分段：文件={match.group(1)}，段数={match.group(2)}，"
+            f"页数={match.group(3)}，每段上限={match.group(4)}"
+        )
+    if match := re.search(r"MinerU chunk (\d+)/(\d+) submit: page_ranges=([^,]+), pages=(\d+)", message):
+        return f"正在提交 MinerU 分段：第 {match.group(1)}/{match.group(2)} 段，页码={match.group(3)}，页数={match.group(4)}"
+    if match := re.search(r"MinerU chunk batch submitted: chunk=(\d+), batch_id=(.+)", message):
+        return f"MinerU 分段任务已提交：段={match.group(1)}，batch_id={match.group(2)}"
+    if match := re.search(r"MinerU chunk processed: chunk=(\d+)/(\d+), pages=(.+)", message):
+        return f"MinerU 分段已处理：第 {match.group(1)}/{match.group(2)} 段，返回页数={match.group(3)}"
+    if message == "MinerU chunked merge start: combining chunk outputs into final document":
+        return "正在合并 MinerU 分段输出到最终文档"
+    if match := re.search(r"MinerU chunked merge copied slides: count=(\d+)", message):
+        return f"MinerU 分段合并完成：已复制页面={match.group(1)}"
+    if match := re.search(r"MinerU chunk audit written: (.+)", message):
+        return f"MinerU 分段审计已写入：{match.group(1)}"
     if match := re.search(r"Submitting remote URL to MinerU: (.+)", message):
         return f"正在提交远程 URL 到 MinerU：{match.group(1)}"
     if match := re.search(r"MinerU submit URL task: model=([^,]+), page_ranges=(.+)", message):
@@ -246,6 +278,92 @@ def translate_progress_message(message: str) -> str:
         return f"MinerU API 失败：{message.split(':', 1)[1].strip()}"
     if message.startswith("MinerU mode requires "):
         return "MinerU 主流程缺少输入来源：请指定 artifact、URL、本地文件、本地多文件或文件夹。"
+    if match := re.search(r"PaddleOCR mode start: mode=([^,]+), model=([^,]+), page_ranges=([^,]+), token_env=(.+)", message):
+        mode, model, page_ranges, token_env = match.groups()
+        pages = "全量" if page_ranges == "all" else page_ranges
+        return f"开始 PaddleOCR 主流程：处理模式={_engine_mode_label(mode)}，模型={model}，页码={pages}，Token环境变量={token_env}"
+    if match := re.search(r"Processing existing PaddleOCR artifact: (.+)", message):
+        return f"正在处理已有 PaddleOCR artifact：{match.group(1)}"
+    if match := re.search(r"PaddleOCR artifact failed: (.+)", message):
+        return f"PaddleOCR artifact 处理失败：{match.group(1)}"
+    if match := re.search(r"Discovering PaddleOCR artifacts: (.+)", message):
+        return f"正在扫描 PaddleOCR artifact：{match.group(1)}"
+    if match := re.search(r"PaddleOCR output directory ready: (.+)", message):
+        return f"PaddleOCR 输出目录已准备：{match.group(1)}"
+    if message == "Adapting PaddleOCR artifacts to DocumentIR":
+        return "正在把 PaddleOCR 结果转换为内部文档结构"
+    if match := PADDLEOCR_DOCUMENT_READY_RE.search(message):
+        return f"PaddleOCR 文档结构已就绪：共 {match.group(1)} 页，块数={match.group(2)}"
+    if match := re.search(r"Copied PaddleOCR assets: count=(\d+)", message):
+        return f"已复制 PaddleOCR 素材：{match.group(1)} 个"
+    if message == "Copied PaddleOCR raw artifacts":
+        return "已复制 PaddleOCR 原始结果"
+    if match := re.search(r"Submitting remote URL to PaddleOCR: (.+)", message):
+        return f"正在提交远程 URL 到 PaddleOCR：{match.group(1)}"
+    if match := re.search(r"Submitting local file to PaddleOCR: (.+?) \((\d+) bytes\)", message):
+        return f"正在提交本地文件到 PaddleOCR：{match.group(1)}，大小={_format_bytes(int(match.group(2)))}"
+    if match := re.search(r"Submitting one local file to PaddleOCR: (.+?) \((\d+) bytes\)", message):
+        return f"正在提交单个本地文件到 PaddleOCR：{match.group(1)}，大小={_format_bytes(int(match.group(2)))}"
+    if match := re.search(r"PaddleOCR submit local file: source=([^,]+), model=([^,]+), page_ranges=(.+)", message):
+        pages = "全量" if match.group(3) == "all" else match.group(3)
+        return f"PaddleOCR 正在上传文件：{match.group(1)}，模型={match.group(2)}，页码={pages}"
+    if match := re.search(r"PaddleOCR submit URL: source=([^,]+), model=([^,]+), page_ranges=(.+)", message):
+        pages = "全量" if match.group(3) == "all" else match.group(3)
+        return f"PaddleOCR 正在提交 URL：{match.group(1)}，模型={match.group(2)}，页码={pages}"
+    if match := re.search(r"PaddleOCR task submitted: job_id=([^,]+)(?:, file=(.+))?", message):
+        file_part = f"，文件={match.group(2)}" if match.group(2) else ""
+        return f"PaddleOCR 任务已提交：job_id={match.group(1)}{file_part}"
+    if match := re.search(r"PaddleOCR job pending: job_id=(.+)", message):
+        return f"等待 PaddleOCR 排队：job_id={match.group(1)}"
+    if match := PADDLEOCR_RUNNING_RE.search(message):
+        return f"等待 PaddleOCR 解析：job_id={match.group(1)}，页数={match.group(2)}/{match.group(3)}"
+    if match := re.search(r"PaddleOCR job running: job_id=(.+)", message):
+        return f"等待 PaddleOCR 解析：job_id={match.group(1)}"
+    if match := re.search(r"PaddleOCR job done: job_id=([^,]+), pages=(.+)", message):
+        return f"PaddleOCR 解析完成：job_id={match.group(1)}，页数={match.group(2)}"
+    if match := re.search(r"PaddleOCR downloading JSONL result: job_id=(.+)", message):
+        return f"正在下载 PaddleOCR JSONL 结果：job_id={match.group(1)}"
+    if match := re.search(r"PaddleOCR downloading Markdown result: job_id=(.+)", message):
+        return f"正在下载 PaddleOCR Markdown 结果：job_id={match.group(1)}"
+    if match := re.search(r"Downloading PaddleOCR artifact: source=([^,]+), cache_key=(.+)", message):
+        return f"正在下载 PaddleOCR artifact：来源={match.group(1)}，缓存键={match.group(2)}"
+    if match := re.search(r"Processing PaddleOCR artifact into Markdown: (.+)", message):
+        return f"正在把 PaddleOCR artifact 转成 Markdown：{match.group(1)}"
+    if match := re.search(r"PaddleOCR mixed local processing start: files=(\d+), chunked_files=(\d+)", message):
+        return f"开始处理 PaddleOCR 本地文件：文件数={match.group(1)}，需要自动分段的文件数={match.group(2)}"
+    if match := re.search(r"PaddleOCR chunked PDF start: source=([^,]+), chunks=(\d+), selected_pages=(\d+), chunk_size=(\d+)", message):
+        return (
+            f"开始 PaddleOCR 自动分段：文件={match.group(1)}，段数={match.group(2)}，"
+            f"页数={match.group(3)}，每段上限={match.group(4)}"
+        )
+    if match := re.search(r"PaddleOCR chunk (\d+)/(\d+) submit: page_ranges=([^,]+), pages=(\d+)", message):
+        return f"正在提交 PaddleOCR 分段：第 {match.group(1)}/{match.group(2)} 段，页码={match.group(3)}，页数={match.group(4)}"
+    if match := re.search(r"PaddleOCR chunk processed: chunk=(\d+)/(\d+), pages=(.+)", message):
+        return f"PaddleOCR 分段已处理：第 {match.group(1)}/{match.group(2)} 段，返回页数={match.group(3)}"
+    if message == "PaddleOCR chunked merge start: combining chunk outputs into final document":
+        return "正在合并 PaddleOCR 分段输出到最终文档"
+    if match := re.search(r"PaddleOCR chunked merge copied slides: count=(\d+)", message):
+        return f"PaddleOCR 分段合并完成：已复制页面={match.group(1)}"
+    if match := re.search(r"PaddleOCR chunk audit written: (.+)", message):
+        return f"PaddleOCR 分段审计已写入：{match.group(1)}"
+    if message.startswith("PaddleOCR hybrid enrichment start"):
+        return "开始 PaddleOCR 混合精修：裁剪图 Vision 识别 + Brain 结构修正 + 校验渲染"
+    if message.startswith("PaddleOCR hybrid enrichment done:"):
+        return f"PaddleOCR 混合精修完成：{message.split(':', 1)[1].strip()}"
+    if match := PADDLEOCR_RENDERING_PAGE_RE.search(message):
+        return f"正在渲染 PaddleOCR Markdown：第 {match.group(1)}/{match.group(2)} 页，slide={match.group(3)}，块数={match.group(4)}"
+    if match := PADDLEOCR_PAGE_RENDERED_RE.search(message):
+        return f"PaddleOCR Markdown 已生成：第 {match.group(1)} 页，状态={_status_label(match.group(2))}"
+    if match := re.search(r"PaddleOCR Markdown rendering done: pages=(\d+), elapsed=([\d.]+)s", message):
+        return f"PaddleOCR Markdown 渲染完成：页数={match.group(1)}，耗时={match.group(2)}秒"
+    if match := re.search(r"PaddleOCR (?:API|artifact) processed: (\d+) pages -> (.+)", message):
+        return f"PaddleOCR 文件处理完成：共 {match.group(1)} 页，输出目录={match.group(2)}"
+    if match := re.search(r"PaddleOCR 本地任务完成：(\d+)/(\d+) 个文件", message):
+        return f"PaddleOCR 本地任务完成：{match.group(1)}/{match.group(2)} 个文件"
+    if message.startswith("PaddleOCR API failed:"):
+        return f"PaddleOCR API 失败：{message.split(':', 1)[1].strip()}"
+    if message.startswith("MinerU artifact failed:"):
+        return f"MinerU artifact 处理失败：{message.split(':', 1)[1].strip()}"
     return message
 
 
