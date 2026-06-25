@@ -2,6 +2,8 @@ import hashlib
 import re
 from typing import Any, Dict, Iterable
 
+from .formula_quality import normalize_text_for_math_coverage
+
 
 CONTENT_INVENTORY_SCHEMA_VERSION = 1
 
@@ -148,8 +150,8 @@ def _text_candidates(text: str) -> list[str]:
 def _normalize_text(text: str) -> str:
     text = re.sub(r"^#+\s*", "", text.strip())
     text = text.strip("` \n\r\t")
-    text = re.sub(r"\s+", " ", text)
-    return text
+    text = normalize_text_for_math_coverage(text)
+    return re.sub(r"[^\w]+", "", text.lower(), flags=re.UNICODE).replace("_", "")
 
 
 def _block_text(block: Dict[str, Any]) -> str:

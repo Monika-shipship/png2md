@@ -3,6 +3,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .log_translate import translate_progress_message
+
 
 class RunLogger:
     def __init__(self, log_path: str | Path | None = None, *, echo: bool = True, reset: bool = True):
@@ -18,7 +20,7 @@ class RunLogger:
         self.info(message)
 
     def info(self, message: str) -> None:
-        text = self._format(message)
+        text = self._format(translate_progress_message(message))
         if self.echo:
             print(text, flush=True)
         if self.log_path:

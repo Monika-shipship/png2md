@@ -2,7 +2,7 @@ import re
 from typing import Any, Dict, List
 
 from .provenance import provenance_comment, renderer_template_block
-from .formula_quality import format_display_math
+from .formula_quality import format_display_math, normalize_inline_math_text
 from .table_quality import assess_table, normalize_table_text
 
 
@@ -81,9 +81,9 @@ def render_block(block: Dict[str, Any]) -> str:
 def _render_block_body(block: Dict[str, Any], text: str) -> str:
     block_type = block.get("type")
     if block_type == "heading":
-        return f"## {_strip_heading_marks(text)}"
+        return f"## {_normalize_user_text(_strip_heading_marks(text))}"
     if block_type in ("paragraph", "formula_inline", "list"):
-        return _strip_known_section_heading(text)
+        return _normalize_user_text(_strip_known_section_heading(text))
     if block_type == "table":
         return _render_table(block)
     if block_type == "formula_block":
@@ -94,14 +94,14 @@ def _render_block_body(block: Dict[str, Any], text: str) -> str:
         return _render_image_ref(block)
     if block_type == "uncertain":
         return _render_uncertain(text)
-    return text
+    return _normalize_user_text(text)
 
 
 def render_raw_text_fallback(raw_text: str, slide_no: int) -> str:
     text = (raw_text or "").strip()
     if not text:
         return f"# Slide {slide_no}\n"
-    return f"# Slide {slide_no}\n\n{text}\n"
+    return f"# Slide {slide_no}\n\n{_normalize_user_text(text)}\n"
 
 
 def _strip_heading_marks(text: str) -> str:
@@ -125,12 +125,12 @@ def _render_formula_block(block: Dict[str, Any], text: str) -> str:
 
 def _render_figure_note(block: Dict[str, Any]) -> str:
     text = block.get("description") or block.get("text") or ""
-    lines = [line.strip() for line in _strip_known_section_heading(text).splitlines() if line.strip()]
+    lines = [_normalize_user_text(line.strip()) for line in _strip_known_section_heading(text).splitlines() if line.strip()]
     figure = block.get("figure") if isinstance(block.get("figure"), dict) else {}
-    labels = block.get("labels") or figure.get("labels") or []
-    relations = block.get("relations") or figure.get("relations") or []
-    linked_blocks = block.get("linked_blocks") or figure.get("linked_blocks") or []
-    uncertainties = block.get("uncertainties") or figure.get("uncertainties") or []
+    labels = _detail_items(block.get("labels") or figure.get("labels"))
+    relations = _detail_items(block.get("relations") or figure.get("relations"))
+    linked_blocks = _detail_items(block.get("linked_blocks") or figure.get("linked_blocks"))
+    uncertainties = _detail_items(block.get("uncertainties") or figure.get("uncertainties"))
     path = (
         block.get("path")
         or block.get("image_path")
@@ -161,10 +161,10 @@ def _figure_detail_lines(
     *,
     lines: list[str],
     figure: dict,
-    labels: list,
-    relations: list,
-    linked_blocks: list,
-    uncertainties: list,
+    labels: list[str],
+    relations: list[str],
+    linked_blocks: list[str],
+    uncertainties: list[str],
     uncertain: bool,
 ) -> list[str]:
     details = []
@@ -190,18 +190,37 @@ def _figure_detail_lines(
     return details
 
 
+def _detail_items(value: Any) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, dict):
+        items = []
+        for key, nested in value.items():
+            nested_items = _detail_items(nested)
+            if nested_items:
+                items.append(f"{key}: {', '.join(nested_items)}")
+        return items
+    if isinstance(value, (list, tuple, set)):
+        items = []
+        for nested in value:
+            items.extend(_detail_items(nested))
+        return items
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def _render_collapsible_details(summary: str, lines: list[str]) -> str:
     body = "\n".join(lines).strip()
     return f"<details>\n<summary>{summary}</summary>\n\n{body}\n\n</details>"
 
 
 def _render_uncertain(text: str) -> str:
-    return _strip_known_section_heading(text)
+    return _normalize_user_text(_strip_known_section_heading(text))
 
 
 def _render_uncertain_formula(block: Dict[str, Any], text: str, warnings: list | None = None) -> str:
     image = _formula_image_reference(block)
-    body = (text or "").strip()
+    body = _normalize_user_text((text or "").strip())
     return f"{image}\n\n{body}" if image else body
 
 
@@ -336,7 +355,7 @@ def _render_image_ref(block: Dict[str, Any]) -> str:
     alt = (block.get("alt") or "image").strip()
     if not path:
         return _render_uncertain(block.get("text") or "")
-    caption = (block.get("caption") or "").strip()
+    caption = _normalize_user_text((block.get("caption") or "").strip())
     image = f"![{alt}]({path})"
     return f"{image}\n\n{caption}" if caption else image
 
@@ -394,6 +413,10 @@ def _strip_known_section_heading(text: str) -> str:
     ):
         lines = lines[1:]
     return "\n".join(line.strip() for line in lines).strip()
+
+
+def _normalize_user_text(text: str) -> str:
+    return normalize_inline_math_text(text or "")
 
 
 def _has_uncertain_marker(text: str) -> bool:

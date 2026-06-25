@@ -23,8 +23,8 @@
 -> 下载/读取 artifact: full.md, layout.json, content_list*.json, model.json, images/
 -> MinerU adapter 转 DocumentIR/PageIR/BlockIR
 -> assets/crops 复制 crop，Markdown 使用相对路径
--> hybrid_enrichment 用视觉模型读取 crop，补充 figure/table/formula block
--> Brain 输出 JSON ops，用默认 deepseek-v4-flash，复杂模式 deepseek-v4-pro
+-> hybrid_enrichment 并行读取所有 crop，补充 figure/table/formula block
+-> Brain 并行处理所有页面，输出 JSON ops，用默认 deepseek-v4-flash，复杂模式 deepseek-v4-pro
 -> apply_block_op_checked 执行受限 op，再跑 checked refiner
 -> validator + content_inventory + run_report
 -> Slide_XX.md + FULL.md
@@ -36,6 +36,31 @@
 - `brain_backend(page_ir, context_pages, config)`：读取当前页和前后页摘要，只返回 JSON ops。
 - 生产默认 backend 会读取 `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY`；没有 key 时快速 fail-open，不把错误写进 Markdown。
 - 测试可以注入 mock backend，不需要真实 API。
+
+## 并行和速度
+
+`hybrid` 对单个 PDF 的处理是阶段式并行：
+
+1. MinerU 先一次性解析整份 PDF，返回所有页面、layout、json 和 crop。
+2. crop Vision 阶段把所有可精读的 crop block 放进同一个线程池，默认并发上限 `60`。
+3. Brain 阶段等 crop Vision 完成后，把所有页面放进同一个线程池，默认并发上限 `60`。
+4. 实际 worker 数取 `min(job_count, configured_workers)`，所以 `49` 个 crop 会用 `49` 个 worker，`11` 页 Brain 会用 `11` 个 worker。
+
+阶段之间不交错，是为了让 Brain 看到完整的当前页和前后页上下文；阶段内部不是串行。
+
+运行日志会写入阶段耗时汇总：
+
+```text
+开始并行识别裁剪块：裁剪块=49，并发=49
+裁剪块并行识别完成：总数=49，成功=49，失败=0，耗时=27.2秒
+开始并行 Brain 精修：页数=11，并发=11
+Brain 并行精修完成：页数=11，状态=正常:9；部分完成:2，耗时=75.0秒
+Markdown 渲染完成：页数=11，耗时=0.1秒
+```
+
+`tests\群论笔记4.1.pdf` 的一次完整 `hybrid + balanced` 日志显示，总耗时约 `108.4s`，其中 MinerU 约 `6.1s`，crop Vision 约 `27.2s`，Brain 约 `75.0s`。瓶颈是 Brain provider 延迟和长尾页面复杂度，不是缺少页级并行。
+
+Brain prompt 已做上下文压缩：目标页保留更多 raw text 和 block 细节，相邻页只保留摘要。以 `群论笔记4.1` 的已有 IR 测算，Brain prompt 字符数从约 `147,652` 降到约 `110,388`，减少约 `25%`。这能降低 token 和延迟，但最终速度仍取决于 provider 响应。
 
 ## 三种模式
 

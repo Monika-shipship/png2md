@@ -753,6 +753,7 @@ def _stage2_warning_fallback_issue(validation: dict, *, slide_no, raw_data_map, 
         "formula_uncertain_marker",
         "formula_markup_needs_normalize",
         "inline_math_suspicious",
+        "unicode_math_symbol_outside_latex",
     }
     for issue in validation.get("warnings") or []:
         if not isinstance(issue, dict):
@@ -775,7 +776,7 @@ def _stage2_warning_fallback_issue(validation: dict, *, slide_no, raw_data_map, 
 
 
 def _fallback_reduces_formula_warnings(validation: dict, *, slide_no, raw_data_map, target_blocks) -> bool:
-    current = _warning_count(validation, ("formula_", "latex_", "inline_math_suspicious"))
+    current = _warning_count(validation, ("formula_", "latex_", "inline_math_suspicious", "unicode_math_symbol_outside_latex"))
     if current <= 0:
         return False
     fallback = _build_stage2_fallback_markdown(
@@ -790,7 +791,10 @@ def _fallback_reduces_formula_warnings(validation: dict, *, slide_no, raw_data_m
     _, fallback_validation = fallback
     if not fallback_validation.ok:
         return False
-    return _warning_count(fallback_validation.to_dict(), ("formula_", "latex_", "inline_math_suspicious")) < current
+    return _warning_count(
+        fallback_validation.to_dict(),
+        ("formula_", "latex_", "inline_math_suspicious", "unicode_math_symbol_outside_latex"),
+    ) < current
 
 
 def _warning_count(validation: dict, codes_or_prefixes: tuple[str, ...]) -> int:

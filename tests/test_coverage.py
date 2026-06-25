@@ -84,3 +84,19 @@ def test_ocr_coverage_keeps_real_text_inside_blockquotes():
     assert result.checked
     assert result.warning is False
     assert result.ratio == 1.0
+
+
+def test_ocr_coverage_treats_unicode_math_and_latex_as_equivalent():
+    blocks = [
+        {
+            "type": "paragraph",
+            "origin": "vision_ocr",
+            "text": "令 φ, θ, ω 为三个角，满足 α+β=γ。",
+        }
+    ]
+
+    result = assess_ocr_coverage("# Slide 1\n\n令 $\\phi, \\theta, \\omega$ 为三个角，满足 $\\alpha + \\beta = \\gamma$。\n", blocks)
+
+    assert result.checked
+    assert result.warning is False
+    assert result.missing_snippets == []

@@ -36,6 +36,8 @@ def test_merge_markdowns_uses_exact_slide_names_and_ok_meta(tmp_path):
     merge_markdowns(tmp_path, "Deck", allowed_slide_numbers=[1, 2, 3, 4])
 
     merged = (tmp_path / "Deck_FULL.md").read_text(encoding="utf-8")
+    assert merged.startswith("# Deck\n\n")
+    assert "汇总笔记" not in merged.splitlines()[0]
     assert "# Slide 1" in merged
     assert "# Slide 2" in merged
     assert "# Slide 3" not in merged

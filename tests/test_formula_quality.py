@@ -1,4 +1,9 @@
-from docpage2md_app.formula_quality import assess_formula_text, normalize_formula_text, normalize_markdown_formula_blocks
+from docpage2md_app.formula_quality import (
+    assess_formula_text,
+    normalize_formula_text,
+    normalize_inline_math_text,
+    normalize_markdown_formula_blocks,
+)
 
 
 def test_formula_quality_normalizes_display_delimiters():
@@ -7,6 +12,37 @@ def test_formula_quality_normalizes_display_delimiters():
     assert result.ok
     assert result.latex == "E = mc^2"
     assert normalize_formula_text(r"\[ a + b \]") == "a + b"
+
+
+def test_formula_quality_normalizes_unicode_math_symbols():
+    assert normalize_formula_text("φ + θ = ω") == r"\phi + \theta = \omega"
+
+
+def test_inline_math_text_wraps_bare_unicode_math_fragment():
+    text = normalize_inline_math_text("令 φ, θ, ω 为三个角，且 α+β=γ。")
+
+    assert "$\\phi, \\theta, \\omega$" in text
+    assert "$\\alpha + \\beta = \\gamma$" in text
+    assert "φ" not in text
+    assert "θ" not in text
+    assert "ω" not in text
+
+
+def test_inline_math_text_wraps_compact_arrow_without_swallowing_words():
+    text = normalize_inline_math_text("Possible typo: 'G→S' might be 'G→S' or 'GS'.")
+
+    assert text.count("'$G \\to S$'") == 2
+    assert "or 'GS'" in text
+    assert "$G \\to S or" not in text
+    assert "→" not in text
+
+
+def test_inline_math_text_wraps_arrow_chain_once():
+    text = normalize_inline_math_text("Layout suggests a vertical sequence (k→g→?) with lateral connections.")
+
+    assert "($k \\to g \\to ?$)" in text
+    assert "$$" not in text
+    assert "→" not in text
 
 
 def test_formula_quality_records_latex_warnings():

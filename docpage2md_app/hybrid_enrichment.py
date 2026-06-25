@@ -1,5 +1,7 @@
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable
@@ -49,61 +51,41 @@ def enrich_mineru_document_ir(
     brain_backend = brain_backend or default_brain_backend
 
     pages = enriched.get("pages") or []
+    safe_progress(
+        progress,
+        (
+            f"Hybrid enrichment workers: pages={len(pages)}, "
+            f"vision={config.vision_batch_workers}, brain={config.brain_batch_workers}"
+        ),
+    )
+    vision_reports = _run_document_crop_vision_enrichment(
+        pages,
+        config,
+        output_root,
+        vision_backend,
+        progress=progress,
+    )
+    context_pages = deepcopy(pages)
+    brain_reports = _run_document_brain_refinement(
+        pages,
+        context_pages,
+        config,
+        brain_backend,
+        progress=progress,
+    )
+
     page_results: dict[int, dict[str, Any]] = {}
     for page_index, page_ir in enumerate(pages):
         slide_no = int(page_ir.get("source_page") or page_index + 1)
-        safe_progress(
-            progress,
-            f"Hybrid page {page_index + 1}/{len(pages)} start: slide={slide_no}, blocks={len(page_ir.get('blocks') or [])}",
+        page_brain = brain_reports[slide_no]
+        op_audit = list((page_brain["brain"] or {}).get("op_audit") or []) + list(
+            (page_brain["block_refiner"] or {}).get("op_audit") or []
         )
-        vision_report = _run_crop_vision_enrichment(
-            page_ir,
-            config,
-            output_root,
-            vision_backend,
-            progress=progress,
-            slide_no=slide_no,
-        )
-        safe_progress(
-            progress,
-            (
-                f"Hybrid page {slide_no} crop vision: status={vision_report.get('status')}, "
-                f"attempted={vision_report.get('attempted_blocks')}, "
-                f"succeeded={vision_report.get('succeeded_blocks')}, failed={vision_report.get('failed_blocks')}"
-            ),
-        )
-        context_pages = _context_window(pages, page_index)
-        safe_progress(progress, f"Hybrid page {slide_no} Brain start: context_pages={len(context_pages)}")
-        page_after_brain, brain_report = _run_brain_ops(page_ir, context_pages, config, brain_backend)
-        safe_progress(
-            progress,
-            (
-                f"Hybrid page {slide_no} Brain done: status={brain_report.get('status')}, "
-                f"ops_requested={brain_report.get('ops_requested')}, "
-                f"applied={brain_report.get('ops_applied')}, rejected={brain_report.get('ops_rejected')}"
-            ),
-        )
-
-        block_refine_result = refine_page_ir(
-            page_after_brain,
-            slide_no=slide_no,
-            target_raw=page_after_brain.get("raw_text"),
-        )
-        safe_progress(
-            progress,
-            (
-                f"Hybrid page {slide_no} refiner done: changed={block_refine_result.changed}, "
-                f"applied={len(block_refine_result.applied_ops)}, dismissed={len(block_refine_result.dismissed)}"
-            ),
-        )
-        pages[page_index] = block_refine_result.page_ir
-
-        op_audit = list(brain_report.get("op_audit") or []) + list(block_refine_result.op_audit or [])
         page_results[slide_no] = {
             "version": HYBRID_ENRICHMENT_VERSION,
-            "vision": vision_report,
-            "brain": brain_report,
-            "block_refiner": block_refine_result.to_dict(),
+            "vision": vision_reports[slide_no],
+            "brain": page_brain["brain"],
+            "block_refiner": page_brain["block_refiner"],
             "op_audit": op_audit,
         }
 
@@ -113,6 +95,268 @@ def enrich_mineru_document_ir(
         "pages": _enrichment_summary(page_results.values()),
     }
     return {"document_ir": enriched, "pages": page_results, "summary": metadata["hybrid_enrichment"]}
+
+
+def _run_document_crop_vision_enrichment(
+    pages: list[dict[str, Any]],
+    config: AppConfig,
+    output_root: Path,
+    vision_backend: VisionBackend,
+    *,
+    progress: ProgressCallback | None = None,
+) -> dict[int, dict[str, Any]]:
+    reports_by_slide: dict[int, dict[str, Any]] = {}
+    jobs: list[tuple[int, dict[str, Any], dict[str, Any], Path]] = []
+    for page_index, page_ir in enumerate(pages):
+        slide_no = int(page_ir.get("source_page") or page_index + 1)
+        safe_progress(
+            progress,
+            f"Hybrid page {page_index + 1}/{len(pages)} start: slide={slide_no}, blocks={len(page_ir.get('blocks') or [])}",
+        )
+        reports_by_slide[slide_no] = _empty_vision_report()
+        for block in page_ir.get("blocks") or []:
+            if block.get("type") not in VISION_ENRICH_BLOCK_TYPES:
+                continue
+            image_path = _resolve_block_image_path(block, output_root)
+            if image_path is None:
+                continue
+            jobs.append((slide_no, page_ir, block, image_path))
+
+    if not jobs:
+        return reports_by_slide
+
+    workers = _worker_count(config.vision_batch_workers, len(jobs))
+    safe_progress(progress, f"Hybrid crop vision batch start: blocks={len(jobs)}, workers={workers}")
+    started = time.monotonic()
+    results_by_slide: dict[int, list[dict[str, Any]]] = {slide_no: [] for slide_no in reports_by_slide}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_run_single_crop_vision_job, slide_no, page_ir, block, image_path, config, vision_backend, progress): slide_no
+            for slide_no, page_ir, block, image_path in jobs
+        }
+        for future in as_completed(futures):
+            slide_no = futures[future]
+            try:
+                results_by_slide.setdefault(slide_no, []).append(future.result())
+            except Exception as exc:
+                safe_progress(progress, f"Crop vision failed: slide={slide_no}, block=<thread>, code=vision_thread_exception")
+                results_by_slide.setdefault(slide_no, []).append(
+                    {
+                        "block_id": None,
+                        "type": None,
+                        "status": "failed",
+                        "error_code": "vision_thread_exception",
+                        "error_message": _safe_model_error(str(exc)),
+                    }
+                )
+
+    for slide_no, block_results in results_by_slide.items():
+        reports_by_slide[slide_no] = _vision_report_from_results(block_results)
+        report = reports_by_slide[slide_no]
+        safe_progress(
+            progress,
+            (
+                f"Hybrid page {slide_no} crop vision: status={report.get('status')}, "
+                f"attempted={report.get('attempted_blocks')}, "
+                f"succeeded={report.get('succeeded_blocks')}, failed={report.get('failed_blocks')}"
+            ),
+        )
+    elapsed = time.monotonic() - started
+    attempted = sum(report.get("attempted_blocks") or 0 for report in reports_by_slide.values())
+    succeeded = sum(report.get("succeeded_blocks") or 0 for report in reports_by_slide.values())
+    failed = sum(report.get("failed_blocks") or 0 for report in reports_by_slide.values())
+    safe_progress(
+        progress,
+        f"Hybrid crop vision batch done: blocks={attempted}, succeeded={succeeded}, failed={failed}, elapsed={elapsed:.1f}s",
+    )
+    return reports_by_slide
+
+
+def _run_single_crop_vision_job(
+    slide_no: int,
+    page_ir: dict[str, Any],
+    block: dict[str, Any],
+    image_path: Path,
+    config: AppConfig,
+    vision_backend: VisionBackend,
+    progress: ProgressCallback | None,
+) -> dict[str, Any]:
+    safe_progress(progress, f"Crop vision start: slide={slide_no}, block={block.get('id')}, type={block.get('type')}")
+    response = vision_backend(page_ir, block, image_path, config)
+    normalized = _normalize_backend_response(response)
+    if normalized.get("success"):
+        changed_fields = _apply_vision_result(block, normalized)
+        safe_progress(
+            progress,
+            f"Crop vision ok: slide={slide_no}, block={block.get('id')}, changed={','.join(changed_fields) or 'none'}",
+        )
+        return {
+            "block_id": block.get("id"),
+            "type": block.get("type"),
+            "status": "ok",
+            "changed_fields": changed_fields,
+            "content_sha256": _response_content_sha256(normalized),
+            **_provider_fields(normalized),
+        }
+
+    safe_progress(progress, f"Crop vision failed: slide={slide_no}, block={block.get('id')}, code={normalized.get('error_code')}")
+    return {
+        "block_id": block.get("id"),
+        "type": block.get("type"),
+        "status": "failed",
+        "error_code": normalized.get("error_code"),
+        "error_message": _safe_model_error(normalized.get("error_message") or "Vision enrichment failed."),
+        **_provider_fields(normalized),
+    }
+
+
+def _run_document_brain_refinement(
+    pages: list[dict[str, Any]],
+    context_pages: list[dict[str, Any]],
+    config: AppConfig,
+    brain_backend: BrainBackend,
+    *,
+    progress: ProgressCallback | None = None,
+) -> dict[int, dict[str, Any]]:
+    if not pages:
+        return {}
+    workers = _worker_count(config.brain_batch_workers, len(pages))
+    safe_progress(progress, f"Hybrid Brain batch start: pages={len(pages)}, workers={workers}")
+    started = time.monotonic()
+    reports_by_slide: dict[int, dict[str, Any]] = {}
+    page_jobs = []
+    for page_index, page_ir in enumerate(pages):
+        slide_no = int(page_ir.get("source_page") or page_index + 1)
+        page_jobs.append((page_index, slide_no, page_ir))
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _run_single_brain_refinement_job,
+                page_index,
+                slide_no,
+                deepcopy(page_ir),
+                context_pages,
+                config,
+                brain_backend,
+                progress,
+            ): (page_index, slide_no)
+            for page_index, slide_no, page_ir in page_jobs
+        }
+        for future in as_completed(futures):
+            page_index, slide_no = futures[future]
+            try:
+                refined_page, report = future.result()
+            except Exception as exc:
+                safe_progress(progress, f"Hybrid page {slide_no} Brain failed: code=brain_thread_exception, error={_safe_model_error(str(exc))}")
+                refined_page = pages[page_index]
+                brain_report = {
+                    "version": HYBRID_ENRICHMENT_VERSION,
+                    "status": "failed",
+                    "ops_requested": 0,
+                    "ops_applied": 0,
+                    "ops_rejected": 0,
+                    "warnings": [],
+                    "op_audit": [],
+                    "error_code": "brain_thread_exception",
+                    "error_message": _safe_model_error(str(exc)),
+                }
+                block_refiner = {
+                    "changed": False,
+                    "applied_ops": [],
+                    "dismissed": [],
+                    "validation": {},
+                    "op_audit": [],
+                }
+                report = {"brain": brain_report, "block_refiner": block_refiner}
+            pages[page_index] = refined_page
+            reports_by_slide[slide_no] = report
+    elapsed = time.monotonic() - started
+    statuses = {}
+    for report in reports_by_slide.values():
+        status = ((report.get("brain") or {}).get("status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+    status_text = ";".join(f"{key}:{value}" for key, value in sorted(statuses.items())) or "none"
+    safe_progress(progress, f"Hybrid Brain batch done: pages={len(pages)}, statuses={status_text}, elapsed={elapsed:.1f}s")
+    return reports_by_slide
+
+
+def _run_single_brain_refinement_job(
+    page_index: int,
+    slide_no: int,
+    page_ir: dict[str, Any],
+    pages: list[dict[str, Any]],
+    config: AppConfig,
+    brain_backend: BrainBackend,
+    progress: ProgressCallback | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    context_window = _context_window(pages, page_index)
+    safe_progress(progress, f"Hybrid page {slide_no} Brain start: context_pages={len(context_window)}")
+    page_after_brain, brain_report = _run_brain_ops(page_ir, context_window, config, brain_backend)
+    safe_progress(
+        progress,
+        (
+            f"Hybrid page {slide_no} Brain done: status={brain_report.get('status')}, "
+            f"ops_requested={brain_report.get('ops_requested')}, "
+            f"applied={brain_report.get('ops_applied')}, rejected={brain_report.get('ops_rejected')}"
+        ),
+    )
+
+    block_refine_result = refine_page_ir(
+        page_after_brain,
+        slide_no=slide_no,
+        target_raw=page_after_brain.get("raw_text"),
+    )
+    safe_progress(
+        progress,
+        (
+            f"Hybrid page {slide_no} refiner done: changed={block_refine_result.changed}, "
+            f"applied={len(block_refine_result.applied_ops)}, dismissed={len(block_refine_result.dismissed)}"
+        ),
+    )
+    return block_refine_result.page_ir, {
+        "brain": brain_report,
+        "block_refiner": block_refine_result.to_dict(),
+    }
+
+
+def _empty_vision_report() -> dict[str, Any]:
+    return {
+        "version": HYBRID_ENRICHMENT_VERSION,
+        "status": "skipped",
+        "attempted_blocks": 0,
+        "succeeded_blocks": 0,
+        "failed_blocks": 0,
+        "blocks": [],
+        "usage": None,
+        "request_id": None,
+        "provider_latency": None,
+    }
+
+
+def _vision_report_from_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    attempted = len(results)
+    succeeded = sum(1 for item in results if item.get("status") == "ok")
+    failed = attempted - succeeded
+    return {
+        "version": HYBRID_ENRICHMENT_VERSION,
+        "status": _stage_status(attempted, succeeded, failed),
+        "attempted_blocks": attempted,
+        "succeeded_blocks": succeeded,
+        "failed_blocks": failed,
+        "blocks": results,
+        "usage": _aggregate_usage(results),
+        "request_id": _first_value(results, "request_id"),
+        "provider_latency": _sum_provider_latency(results),
+    }
+
+
+def _worker_count(configured: int, jobs: int) -> int:
+    try:
+        workers = int(configured)
+    except (TypeError, ValueError):
+        workers = 1
+    return max(1, min(max(1, jobs), workers if workers > 0 else 1))
 
 
 def default_crop_vision_backend(
@@ -472,24 +716,11 @@ def _crop_vision_prompt(block: dict[str, Any]) -> str:
 
 def _brain_ops_prompt(page_ir: dict[str, Any], context_pages: list[dict[str, Any]]) -> str:
     page_no = int(page_ir.get("source_page") or 0)
-    context = [
-        {
-            "page": page.get("source_page"),
-            "raw_text": _truncate(page.get("raw_text") or "", 1800),
-            "blocks": [
-                {
-                    "id": block.get("id"),
-                    "type": block.get("type"),
-                    "text": _truncate(block.get("latex") or block.get("text") or block.get("description") or "", 500),
-                }
-                for block in (page.get("blocks") or [])[:80]
-            ],
-        }
-        for page in context_pages
-    ]
+    context = [_brain_context_page(page, target_page_no=page_no) for page in context_pages]
     return (
         "你是 DocPage2MD 的 Brain 纠错器。只能输出 JSON，不得输出 Markdown，不得输出思考过程。\n"
         "任务：结合前后页上下文，修正明显 OCR/LaTeX 识别错误。不要自由重写整页，不要删除大段内容。\n"
+        "公式和数学符号必须使用 LaTeX；即使符号混在 paragraph/text block 中，也要改成 $...$ 内的 \\phi、\\theta、\\omega 等命令，不能保留裸 φ、θ、ω。\n"
         "允许 ops：replace_text_span_checked, normalize_formula, mark_uncertain, merge_block, promote_heading, demote_heading。\n"
         "replace_text_span_checked 格式："
         '{"op":"replace_text_span_checked","id":"p0001-b001","old_text":"...","new_text":"...","field":"text","reason":"..."}\n'
@@ -497,6 +728,32 @@ def _brain_ops_prompt(page_ir: dict[str, Any], context_pages: list[dict[str, Any
         f"上下文 JSON：{json.dumps(context, ensure_ascii=False)}\n"
         '返回格式：{"ops":[],"warnings":[]}'
     )
+
+
+def _brain_context_page(page: dict[str, Any], *, target_page_no: int) -> dict[str, Any]:
+    page_no = int(page.get("source_page") or 0)
+    is_target = page_no == target_page_no
+    block_limit = 80 if is_target else 32
+    raw_limit = 1600 if is_target else 360
+    text_limit = 420 if is_target else 120
+    return {
+        "page": page.get("source_page"),
+        "role": "target" if is_target else "neighbor",
+        "raw_text": _truncate(page.get("raw_text") or "", raw_limit),
+        "blocks": [
+            {
+                "id": block.get("id"),
+                "type": block.get("type"),
+                "text": _truncate(block.get("latex") or block.get("text") or block.get("description") or "", text_limit),
+            }
+            for block in (page.get("blocks") or [])[:block_limit]
+            if _brain_context_block_text(block)
+        ],
+    }
+
+
+def _brain_context_block_text(block: dict[str, Any]) -> str:
+    return str(block.get("latex") or block.get("text") or block.get("description") or "").strip()
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:

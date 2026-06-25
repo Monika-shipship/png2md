@@ -172,7 +172,7 @@ def merge_markdowns(doc_output_dir, doc_name, allowed_slide_numbers=None):
         md_files.append(candidate)
     chunks = [
         (
-            f"# {doc_name} 汇总笔记\n\n"
+            f"# {doc_name}\n\n"
             f"> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             "> 引擎: V10 (Parallel Brain)\n\n"
         )
@@ -203,8 +203,21 @@ def write_text_atomic(path, text):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    with tmp_path.open("w", encoding="utf-8", newline="") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, target)
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+    except PermissionError:
+        # Some Windows sandbox/cache directories allow file creation but deny
+        # delete/rename. Fall back to direct write so manifests/reports can
+        # still be produced after MinerU extraction.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        with target.open("w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())

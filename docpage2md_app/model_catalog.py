@@ -74,6 +74,20 @@ def get_default_catalog():
         ),
         ModelSpec(
             provider="dashscope",
+            model_id="qwen3-vl-flash",
+            display_name="Qwen3-VL-Flash",
+            roles=(ROLE_VISION,),
+            supports_vision=True,
+            supports_thinking=True,
+            price=ModelPrice(0.15, 1.5, 0.03, source="docs/reference-pricing/模型调用计费2026.6.23.md"),
+            context_tokens=256_000,
+            max_output_tokens=32_000,
+            rpm=3000,
+            tpm=5_000_000,
+            note="便宜快速；当前能力等同于 qwen3-vl-flash-2026-01-22。",
+        ),
+        ModelSpec(
+            provider="dashscope",
             model_id="qwen3.7-plus",
             display_name="Qwen3.7-Plus",
             roles=(ROLE_VISION, ROLE_BRAIN),
@@ -404,6 +418,11 @@ def _static_price_tiers(model_id):
             {"max_tokens": 256_000, "input": 3.0, "output": 30.0},
         ],
         "qwen3-vl-flash-2026-01-22": [
+            {"max_tokens": 32_000, "input": 0.15, "output": 1.5},
+            {"max_tokens": 128_000, "input": 0.3, "output": 3.0},
+            {"max_tokens": 256_000, "input": 0.6, "output": 6.0},
+        ],
+        "qwen3-vl-flash": [
             {"max_tokens": 32_000, "input": 0.15, "output": 1.5},
             {"max_tokens": 128_000, "input": 0.3, "output": 3.0},
             {"max_tokens": 256_000, "input": 0.6, "output": 6.0},

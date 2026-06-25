@@ -59,6 +59,26 @@ def test_render_page_ir_to_markdown_is_deterministic():
         "- 可见标签：A，B\n\n"
         "</details>\n"
     )
+    assert "<details open" not in markdown
+
+
+def test_renderer_normalizes_unicode_math_inside_text_blocks():
+    markdown = render_blocks_to_markdown(
+        [
+            {"type": "paragraph", "text": "令 φ, θ, ω 为三个角。"},
+            {"type": "formula_inline", "text": "α+β=γ"},
+            {"type": "figure_note", "description": "坐标轴标注为 θ 和 φ。"},
+        ],
+        22,
+    )
+
+    assert "$\\phi, \\theta, \\omega$" in markdown
+    assert "$\\alpha + \\beta = \\gamma$" in markdown
+    assert "$\\theta$" in markdown
+    assert "$\\phi$" in markdown
+    assert "φ" not in markdown
+    assert "θ" not in markdown
+    assert "ω" not in markdown
 
 
 def test_golden_renderer_fixture():
@@ -177,6 +197,31 @@ def test_figure_with_image_path_renders_markdown_image_reference():
         "- 说明：坐标图：横轴为 t，纵轴为 v。\n\n"
         "</details>\n"
     )
+
+
+def test_figure_note_accepts_nested_model_metadata():
+    markdown = render_blocks_to_markdown(
+        [
+            {
+                "type": "figure_note",
+                "description": "三角形 ABC，边 a、b、c 已标注。",
+                "labels": {
+                    "vertices": ["A", "B", "C"],
+                    "sides": ["a", "b", "c"],
+                    "internal_lines": ["altitude from A", "median?"],
+                },
+                "relations": ["side a opposite A"],
+                "uncertainties": {"geometry": ["internal line role unclear"]},
+                "unrecognizable": False,
+            }
+        ],
+        21,
+    )
+
+    assert "vertices: A, B, C" in markdown
+    assert "sides: a, b, c" in markdown
+    assert "internal_lines: altitude from A, median?" in markdown
+    assert "geometry: internal line role unclear" in markdown
 
 
 def test_image_ref_uses_crop_ref_and_missing_path_stays_silent():

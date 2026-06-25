@@ -150,3 +150,23 @@ def test_content_inventory_matches_normalized_markdown_text():
 
     assert inventory["entries"][0]["status"] == "rendered"
     assert inventory["summary"]["unaccounted_count"] == 0
+
+
+def test_content_inventory_matches_unicode_math_source_to_latex_markdown():
+    page_ir = {
+        "source_page": 1,
+        "blocks": [
+            {
+                "id": "p0001-b001",
+                "type": "paragraph",
+                "text": "令 φ, θ, ω 为三个角，满足 α+β=γ。",
+                "source_engine": "mineru",
+            }
+        ],
+    }
+    markdown = "# Slide 1\n\n令 $\\phi, \\theta, \\omega$ 为三个角，满足 $\\alpha + \\beta = \\gamma$。\n"
+
+    inventory = build_content_inventory(page_ir, markdown)
+
+    assert inventory["entries"][0]["status"] == "rendered"
+    assert inventory["summary"]["unaccounted_count"] == 0

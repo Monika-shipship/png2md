@@ -75,6 +75,40 @@ def delete_third_party_model(config: AppConfig, item_id: str) -> bool:
     return True
 
 
+def update_third_party_model_verification(
+    config: AppConfig,
+    item_id: str,
+    role: str,
+    status: str,
+    error: str = "",
+) -> Dict:
+    _, read_error = _read_registry_records(config)
+    if read_error:
+        raise ValueError(f"第三方模型注册表无法读取，已拒绝覆盖: {read_error}")
+
+    models = load_third_party_models(config)
+    verification_key = "vision" if role == ROLE_VISION else "text"
+    normalized_status = "ok" if status == "ok" else "failed"
+    for index, item in enumerate(models):
+        if item.get("id") != item_id:
+            continue
+        updated = dict(item)
+        verification = dict(updated.get("verification") or {})
+        verification[verification_key] = normalized_status
+        verification[f"{verification_key}_raw_status"] = status
+        if error:
+            verification[f"{verification_key}_error"] = error[:500]
+        else:
+            verification.pop(f"{verification_key}_error", None)
+        verification[f"{verification_key}_checked_at"] = _now_iso()
+        updated["verification"] = verification
+        updated["updated_at"] = _now_iso()
+        models[index] = updated
+        save_third_party_models(config, models)
+        return load_third_party_models(config)[index]
+    raise ValueError(f"未找到第三方模型: {item_id}")
+
+
 def registry_item_to_model_record(item: Dict) -> ModelRecord:
     roles = _roles_to_stage_suitable(item.get("roles") or [])
     supports_vision = item.get("supports_vision")

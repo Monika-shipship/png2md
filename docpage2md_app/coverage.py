@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
+from .formula_quality import normalize_text_for_math_coverage
+
 
 OCR_COVERAGE_SCHEMA_VERSION = 1
 OCR_COVERAGE_MIN_RATIO = 0.62
@@ -128,4 +130,5 @@ def _markdown_content_for_coverage(markdown: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    return re.sub(r"[^\w]+", "", (text or "").lower(), flags=re.UNICODE).replace("_", "")
+    normalized = normalize_text_for_math_coverage(text or "").lower()
+    return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE).replace("_", "")

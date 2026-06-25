@@ -477,6 +477,72 @@ def test_brain_stage_bad_formula_falls_back_when_page_ir_is_clean(monkeypatch, t
     assert "$$\n\\frac a}{b\n$$" not in markdown
 
 
+def test_brain_stage_unicode_math_symbols_fall_back_to_latex_page_ir(monkeypatch, tmp_path):
+    config = AppConfig(brain_batch_workers=1)
+    report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)
+    page_reports[1]["stage1"]["status"] = "ok"
+    raw_data_map = {1: "令 φ, θ, ω 为三个角，满足 α+β=γ。"}
+    target_blocks = {1: build_page_ir(raw_data_map[1], 1)["blocks"]}
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_stage_2_brain_parallel",
+        lambda slide_no, raw_data_map, config: {
+            "success": True,
+            "slide_no": slide_no,
+            "markdown": "# Slide 1\n\n令 φ, θ, ω 为三个角，满足 α+β=γ。\n",
+            "raw_response": "# Slide 1\n\n令 φ, θ, ω 为三个角，满足 α+β=γ。\n",
+        },
+    )
+
+    ok_slides = pipeline._run_brain_stage(
+        "Deck",
+        1,
+        0,
+        tmp_path,
+        raw_data_map,
+        1,
+        DummyQueue(),
+        config,
+        page_reports,
+        target_blocks_by_slide=target_blocks,
+    )
+
+    markdown = (tmp_path / "Slide_01.md").read_text(encoding="utf-8")
+    meta = read_json(tmp_path / "Slide_01.meta.json")
+    assert ok_slides == [1]
+    assert meta["status"] == "ok"
+    assert "$\\phi, \\theta, \\omega$" in markdown
+    assert "$\\alpha + \\beta = \\gamma$" in markdown
+    assert "φ" not in markdown
+    assert "θ" not in markdown
+    assert "ω" not in markdown
+
+
+def test_stage2_warning_fallback_issue_detects_unicode_math_symbol_warning():
+    raw_data_map = {1: "令 φ, θ, ω 为三个角，满足 α+β=γ。"}
+    target_blocks = build_page_ir(raw_data_map[1], 1)["blocks"]
+    validation = {
+        "ok": True,
+        "errors": [],
+        "warnings": [
+            {
+                "code": "unicode_math_symbol_outside_latex",
+                "message": "最终 Markdown 含裸 Unicode 数学符号。",
+            }
+        ],
+    }
+
+    issue = pipeline._stage2_warning_fallback_issue(
+        validation,
+        slide_no=1,
+        raw_data_map=raw_data_map,
+        target_blocks=target_blocks,
+    )
+
+    assert issue["code"] == "unicode_math_symbol_outside_latex"
+
+
 def test_brain_stage_formula_warning_falls_back_to_conservative_formula_warning(monkeypatch, tmp_path):
     config = AppConfig(brain_batch_workers=1)
     report, page_reports = build_run_report("Deck", [str(tmp_path / "page.png")], 0, config)

@@ -79,7 +79,13 @@ python docpage2md.py --engine-mode mineru_only --input-files ".\a.pdf" ".\b.pptx
 python docpage2md.py --engine-mode hybrid --input-folder ".\待处理文档" --recursive
 ```
 
-程序会按支持后缀筛选 PDF、Office、图片和 HTML 文件。当前没有 GUI 文件选择器；可以从 Windows 资源管理器复制文件路径，再粘贴到 `--input-file` 后面。
+程序会按支持后缀筛选 PDF、Office、图片和 HTML 文件。日常手动选择文件可启动轻量 GUI：
+
+```powershell
+python docpage2md_gui.py
+```
+
+也可以从 Windows 资源管理器复制文件路径，再粘贴到 CLI 的 `--input-file` 后面。
 
 远程 URL：
 

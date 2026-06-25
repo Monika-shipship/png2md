@@ -1,4 +1,5 @@
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,7 @@ def process_mineru_artifact_task(
     report = _initial_report(output_name, mode, artifacts, config, document_ir)
     ok_slides = []
     final_pages = document_ir.get("pages") or []
+    render_started = time.monotonic()
     for page_index, page_ir in enumerate(final_pages, start=1):
         slide_no = int(page_ir.get("source_page") or 0)
         if slide_no <= 0:
@@ -112,6 +114,7 @@ def process_mineru_artifact_task(
         report["pages"].append(page_report)
         refresh_page_suspects(page_report, page_ir.get("blocks") or [])
         safe_progress(progress, f"Page rendered: slide={slide_no}, status={status}, markdown={slide_path.name}")
+    safe_progress(progress, f"Markdown rendering done: pages={len(ok_slides)}, elapsed={time.monotonic() - render_started:.1f}s")
 
     safe_progress(progress, "Merging per-page Markdown into FULL document")
     merge_markdowns(output_root, output_name, allowed_slide_numbers=ok_slides)

@@ -7,6 +7,7 @@ from docpage2md_app.third_party_models import (
     filter_registry_models,
     load_third_party_models,
     parse_bulk_models_text,
+    update_third_party_model_verification,
     upsert_third_party_model,
 )
 
@@ -73,3 +74,53 @@ def test_delete_third_party_model(tmp_path):
     assert delete_third_party_model(config, saved["id"]) is True
     assert delete_third_party_model(config, saved["id"]) is False
     assert load_third_party_models(config) == []
+
+
+def test_third_party_registry_stores_env_name_not_secret(tmp_path):
+    config = AppConfig(log_folder=str(tmp_path))
+    upsert_third_party_model(
+        config,
+        {
+            "model_id": "vendor/model-a",
+            "api_key_env": "VENDOR_API_KEY",
+            "note": "ordinary note",
+        },
+    )
+
+    raw = config.third_party_models_path.read_text(encoding="utf-8")
+
+    assert "VENDOR_API_KEY" in raw
+    assert "ordinary note" in raw
+    assert "sk-" not in raw
+
+
+def test_update_third_party_model_verification_persists_status_without_secret(tmp_path):
+    config = AppConfig(log_folder=str(tmp_path))
+    saved = upsert_third_party_model(
+        config,
+        {
+            "model_id": "vendor/model-a",
+            "api_key_env": "VENDOR_API_KEY",
+            "roles": "vision",
+        },
+    )
+
+    updated = update_third_party_model_verification(config, saved["id"], ROLE_VISION, "ok", "")
+    raw = config.third_party_models_path.read_text(encoding="utf-8")
+
+    assert updated["verification"]["vision"] == "ok"
+    assert updated["verification"]["vision_raw_status"] == "ok"
+    assert "vision_checked_at" in updated["verification"]
+    assert "VENDOR_API_KEY" in raw
+    assert "sk-" not in raw
+
+
+def test_update_verification_does_not_overwrite_bad_registry(tmp_path):
+    config = AppConfig(log_folder=str(tmp_path))
+    config.log_path.mkdir(parents=True, exist_ok=True)
+    config.third_party_models_path.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        update_third_party_model_verification(config, "missing", ROLE_BRAIN, "ok")
+
+    assert config.third_party_models_path.read_text(encoding="utf-8") == "{not valid json"

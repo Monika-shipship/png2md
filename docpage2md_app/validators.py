@@ -4,7 +4,13 @@ from difflib import SequenceMatcher
 from typing import Literal
 
 from .coverage import assess_ocr_coverage
-from .formula_quality import markdown_formula_markup_needs_normalize
+from .formula_quality import (
+    contains_unicode_math_symbols,
+    markdown_formula_markup_needs_normalize,
+    normalize_text_for_math_coverage,
+    strip_math_and_code_regions,
+    unicode_math_symbols_in_text,
+)
 from .ir import build_page_ir
 from .table_quality import assess_table
 
@@ -140,6 +146,7 @@ def validate_slide_markdown(
         errors.append(_issue("display_math_unbalanced", "error", "行间公式 $$ 分隔符数量不成对。", slide_no))
     errors.extend(_formula_delimiter_errors(code_free, slide_no))
     warnings.extend(_formula_quality_warnings(code_free, slide_no))
+    warnings.extend(_unicode_math_symbol_warnings(text, slide_no))
     if markdown_formula_markup_needs_normalize(code_free):
         warnings.append(
             _issue(
@@ -251,6 +258,23 @@ def _formula_quality_warnings(text: str, slide_no: int) -> list[ValidationIssue]
         if _has_uncertain_formula_marker(segment):
             warnings.append(_issue("formula_uncertain_marker", "warning", "公式中包含不确定识别标记。", slide_no, segment[:120]))
     return _dedupe_issues(warnings)
+
+
+def _unicode_math_symbol_warnings(text: str, slide_no: int) -> list[ValidationIssue]:
+    plain_text = strip_math_and_code_regions(text)
+    if not contains_unicode_math_symbols(plain_text):
+        return []
+    symbols = unicode_math_symbols_in_text(plain_text)
+    evidence = _formula_preview(" ".join(symbols[:12]) + " | " + _unicode_math_evidence(plain_text), 160)
+    return [
+        _issue(
+            "unicode_math_symbol_outside_latex",
+            "warning",
+            "最终 Markdown 含裸 Unicode 数学符号，应改成 LaTeX 并放入 $...$ 或 $$...$$。",
+            slide_no,
+            evidence,
+        )
+    ]
 
 
 def _table_quality_warnings(text: str, slide_no: int) -> list[ValidationIssue]:
@@ -541,7 +565,7 @@ def _block_match_ratio(source_norm: str, markdown_norm: str) -> float:
 
 
 def _normalize_formula_for_coverage(text: str) -> str:
-    normalized = (text or "").lower()
+    normalized = normalize_text_for_math_coverage(text or "").lower()
     normalized = normalized.replace(r"\mathrm", "")
     normalized = normalized.replace(r"\operatorname", "")
     return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE).replace("_", "")
@@ -553,7 +577,7 @@ def _normalize_block_text_for_coverage(text: str) -> str:
     normalized = re.sub(r"(?m)^#{1,6}\s*", "", normalized)
     normalized = re.sub(r"(?m)^>\s*\[!(?:NOTE|WARNING|TIP|IMPORTANT|CAUTION)\].*$", " ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"(?m)^>\s*", "", normalized)
-    normalized = normalized.lower()
+    normalized = normalize_text_for_math_coverage(normalized).lower()
     return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE).replace("_", "")
 
 
@@ -562,6 +586,13 @@ def _formula_preview(text: str, limit: int = 120) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3].rstrip() + "..."
+
+
+def _unicode_math_evidence(text: str) -> str:
+    for line in (text or "").splitlines():
+        if contains_unicode_math_symbols(line):
+            return line.strip()
+    return (text or "").strip()
 
 
 def _block_source_text(block: dict) -> str:

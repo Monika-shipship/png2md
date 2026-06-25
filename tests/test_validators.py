@@ -58,6 +58,20 @@ def test_valid_complex_formula_is_not_warned():
     assert result.warnings == []
 
 
+def test_unicode_math_symbols_outside_latex_warn():
+    result = validate_slide_markdown("# Slide 1\n\n令 φ, θ, ω 为三个角。\n", 1)
+
+    assert result.ok
+    assert "unicode_math_symbol_outside_latex" in {issue.code for issue in result.warnings}
+
+
+def test_latex_math_symbols_do_not_warn_as_unicode_math():
+    result = validate_slide_markdown("# Slide 1\n\n令 $\\phi, \\theta, \\omega$ 为三个角。\n", 1)
+
+    assert result.ok
+    assert "unicode_math_symbol_outside_latex" not in {issue.code for issue in result.warnings}
+
+
 def test_formula_markup_inside_aligned_warns_for_normalization():
     result = validate_slide_markdown(
         "# Slide 1\n\n"

@@ -185,7 +185,7 @@ PageIR renderer 会把不同 block 渲染成稳定 Markdown：
 - 不可靠公式保守保留原始识别；有 crop 时保留图片引用，详细 warning 写入 report
 - 可靠表格渲染为 Markdown table
 - 不可靠表格渲染为 fenced raw text，有图片证据时保留图片引用，详细 warning 写入 report
-- 图示渲染为图片引用 + 默认折叠的 `<details><summary>图示识别内容</summary>...`
+- 图示渲染为图片引用 + 默认折叠的 Typora 兼容 `<details>` 块；`<details>` 和 `<summary>` 分行，不加 `open` 属性
 - 不确定内容保守保留正文或图片证据，详细原因写入 report
 
 最终用户仍然打开 `Slide_XX.md` 和 `{任务名}_FULL.md`，不需要直接读 IR。

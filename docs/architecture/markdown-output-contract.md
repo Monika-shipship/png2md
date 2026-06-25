@@ -54,7 +54,7 @@ IR、report、缓存、原始模型响应都不是最终阅读产物。
 </details>
 ```
 
-图示说明默认折叠，避免大段解释污染正文。视觉模型不能确定时，仍保留图片，折叠内容写明“不确定”，不得编造标签。
+图示说明默认折叠，避免大段解释污染正文。为兼容 Typora，`<details>` 和 `<summary>` 必须分行，且不要加 `open` 属性。视觉模型不能确定时，仍保留图片，折叠内容写明“不确定”，不得编造标签。
 
 ## 公式输出
 
@@ -78,6 +78,8 @@ $$
 - 重复 tag、嵌套 tag、`\tag{\tag{3}}`。
 
 无法安全修复时，保留原始公式或 crop 证据，详细原因写入 `run_report.json`。
+
+正文 text/paragraph block 中如果混有公式，也必须转成 LaTeX 片段。最终 Markdown 不应保留裸 Unicode 数学符号，例如 `φ`、`θ`、`ω`、`α`、`β`、`≤`、`≥`、`→`；应写成 `$\phi$`、`$\theta$`、`$\omega$`、`$\alpha$`、`$\beta$`、`$\leq$`、`$\geq$`、`$\to$` 等可渲染形式。validator 会对数学分隔符外的裸 Unicode 数学符号产生 `unicode_math_symbol_outside_latex` warning。
 
 ## 表格输出
 

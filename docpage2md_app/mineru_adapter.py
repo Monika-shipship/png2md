@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .figures import analyze_figure_description
-from .formula_quality import assess_formula_text
+from .formula_quality import assess_formula_text, normalize_inline_math_text
 from .ir import PAGE_IR_SCHEMA_VERSION
 from .mineru_artifacts import MinerUArtifacts, discover_mineru_artifacts, load_artifact_json, resolve_artifact_image
 from .table_quality import assess_table
@@ -207,7 +207,7 @@ def _adapt_content_item(
     page_size: list[int] | None,
 ) -> dict[str, Any] | None:
     mineru_type = str(item.get("type") or match.get("type") if match else item.get("type") or "").strip()
-    text = _content_text(item).strip()
+    text = normalize_inline_math_text(_content_text(item)).strip()
     image_ref = _content_image_ref(item) or (match or {}).get("img_path")
     resolved_image = resolve_artifact_image(artifacts, image_ref)
     artifact_image_ref = _artifact_image_ref(artifacts, resolved_image, image_ref)
@@ -251,7 +251,7 @@ def _adapt_content_item(
         quality = assess_formula_text(latex)
         block.update(
             {
-                "text": latex,
+                "text": quality.latex,
                 "latex": quality.latex,
                 "raw_text": latex,
                 "formula_quality": quality.to_dict(),

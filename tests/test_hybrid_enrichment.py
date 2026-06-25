@@ -1,10 +1,12 @@
 import json
+import threading
+import time
 from pathlib import Path
 
 from docpage2md_app.artifacts import sha256_text
 from docpage2md_app.config import AppConfig
 from docpage2md_app import hybrid_enrichment
-from docpage2md_app.hybrid_enrichment import default_brain_backend, enrich_mineru_document_ir
+from docpage2md_app.hybrid_enrichment import _brain_ops_prompt, default_brain_backend, enrich_mineru_document_ir
 from docpage2md_app.ir import PAGE_IR_SCHEMA_VERSION
 from docpage2md_app.renderer import render_page_ir_to_markdown
 
@@ -107,34 +109,104 @@ def test_default_brain_backend_retries_empty_or_invalid_json(monkeypatch):
     assert "hidden first reasoning" not in json.dumps(result, ensure_ascii=False)
 
 
+def test_hybrid_enrichment_runs_vision_and_brain_in_parallel(tmp_path):
+    output_root = tmp_path / "HybridDoc"
+    crop_dir = output_root / "assets" / "crops"
+    crop_dir.mkdir(parents=True)
+    for index in range(1, 5):
+        (crop_dir / f"formula-{index}.jpg").write_bytes(b"fake formula")
+
+    document_ir = _document_ir_pages(
+        [
+            [_block("p0001-b001", "formula_block", "x_1", crop_ref="assets/crops/formula-1.jpg", origin="vision_formula")],
+            [_block("p0002-b001", "formula_block", "x_2", crop_ref="assets/crops/formula-2.jpg", origin="vision_formula", source_page=2)],
+            [_block("p0003-b001", "formula_block", "x_3", crop_ref="assets/crops/formula-3.jpg", origin="vision_formula", source_page=3)],
+            [_block("p0004-b001", "formula_block", "x_4", crop_ref="assets/crops/formula-4.jpg", origin="vision_formula", source_page=4)],
+        ]
+    )
+    vision_counter = _ConcurrencyCounter()
+    brain_counter = _ConcurrencyCounter()
+
+    def vision_backend(page_ir, block, image_path: Path | None, config):
+        with vision_counter:
+            time.sleep(0.02)
+            return {"success": True, "latex": block["text"]}
+
+    def brain_backend(page_ir, context_pages, config):
+        assert len(context_pages) >= 3
+        with brain_counter:
+            time.sleep(0.02)
+            return {"success": True, "ops": []}
+
+    result = enrich_mineru_document_ir(
+        document_ir,
+        AppConfig(engine_mode="hybrid", vision_batch_workers=4, brain_batch_workers=4),
+        output_root=output_root,
+        vision_backend=vision_backend,
+        brain_backend=brain_backend,
+    )
+
+    assert vision_counter.max_active > 1
+    assert brain_counter.max_active > 1
+    assert result["summary"]["pages"]["page_count"] == 4
+
+
+def test_brain_prompt_keeps_target_detail_and_compresses_neighbors():
+    long_neighbor = "邻页上下文" * 300
+    long_target = "目标页正文" * 300
+    document_ir = _document_ir_pages(
+        [
+            [_block("p0001-b001", "paragraph", long_neighbor, origin="vision_ocr")],
+            [_block("p0002-b001", "paragraph", long_target, origin="vision_ocr", source_page=2)],
+            [_block("p0003-b001", "paragraph", long_neighbor, origin="vision_ocr", source_page=3)],
+        ]
+    )
+
+    prompt = _brain_ops_prompt(document_ir["pages"][1], document_ir["pages"])
+
+    assert '"role": "target"' in prompt
+    assert '"role": "neighbor"' in prompt
+    assert long_target[:400] in prompt
+    assert long_neighbor not in prompt
+
+
 def _document_ir(blocks):
-    raw_text = "\n\n".join(block.get("text") or block.get("description") or "" for block in blocks)
-    return {
-        "schema_version": "docpage2md-docir-v1",
-        "engine_mode": "hybrid",
-        "source": {"input_path": "notes.pdf", "input_type": "pdf"},
-        "pages": [
+    return _document_ir_pages([blocks])
+
+
+def _document_ir_pages(pages_blocks):
+    pages = []
+    for page_index, blocks in enumerate(pages_blocks, start=1):
+        raw_text = "\n\n".join(block.get("text") or block.get("description") or "" for block in blocks)
+        for block in blocks:
+            block["source_page"] = page_index
+        pages.append(
             {
                 "schema_version": PAGE_IR_SCHEMA_VERSION,
-                "source_page": 1,
+                "source_page": page_index,
                 "page_image_ref": None,
                 "raw_text": raw_text,
                 "raw_text_sha256": sha256_text(raw_text),
                 "blocks": blocks,
-                "mineru": {"page_idx": 0, "page_size": [100, 100], "artifact_refs": {}},
+                "mineru": {"page_idx": page_index - 1, "page_size": [100, 100], "artifact_refs": {}},
             }
-        ],
+        )
+    return {
+        "schema_version": "docpage2md-docir-v1",
+        "engine_mode": "hybrid",
+        "source": {"input_path": "notes.pdf", "input_type": "pdf"},
+        "pages": pages,
         "assets": [],
         "metadata": {},
     }
 
 
-def _block(block_id, block_type, text, *, crop_ref=None, origin):
+def _block(block_id, block_type, text, *, crop_ref=None, origin, source_page=1):
     block = {
         "id": block_id,
         "type": block_type,
         "text": text,
-        "source_page": 1,
+        "source_page": source_page,
         "confidence": 0.75,
         "origin": origin,
         "source_engine": "mineru",
@@ -148,3 +220,19 @@ def _block(block_id, block_type, text, *, crop_ref=None, origin):
         block["latex"] = text
         block["raw_text"] = text
     return block
+
+
+class _ConcurrencyCounter:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def __enter__(self):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+
+    def __exit__(self, *_exc):
+        with self.lock:
+            self.active -= 1

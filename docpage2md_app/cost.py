@@ -1,24 +1,158 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
 from .aliyun_catalog import ModelRecord
+from .deepseek_tokenizer import count_chat_tokens, count_text_tokens, heuristic_text_tokens
 
 
-def calculate_image_tokens(image_path):
+QWEN_VISION_FACTOR = 32
+QWEN_VISION_TOKEN_PIXELS = QWEN_VISION_FACTOR * QWEN_VISION_FACTOR
+QWEN_VISION_MIN_PIXELS = 4 * QWEN_VISION_TOKEN_PIXELS
+QWEN_VISION_DEFAULT_MAX_PIXELS = 2560 * QWEN_VISION_TOKEN_PIXELS
+QWEN_VISION_HIGH_RES_MAX_PIXELS = 16384 * QWEN_VISION_TOKEN_PIXELS
+
+
+@dataclass(frozen=True)
+class ImageTokenEstimate:
+    width: int
+    height: int
+    resized_width: int
+    resized_height: int
+    tokens: int
+    factor: int = QWEN_VISION_FACTOR
+    token_pixels: int = QWEN_VISION_TOKEN_PIXELS
+    max_pixels: int = QWEN_VISION_DEFAULT_MAX_PIXELS
+    min_pixels: int = QWEN_VISION_MIN_PIXELS
+    source: str = "qwen_vl_smart_resize"
+
+
+def calculate_image_tokens(
+    image_path,
+    *,
+    max_pixels: int = QWEN_VISION_DEFAULT_MAX_PIXELS,
+    min_pixels: int = QWEN_VISION_MIN_PIXELS,
+    factor: int = QWEN_VISION_FACTOR,
+    vl_high_resolution_images: bool = False,
+    fallback_tokens: int = 2000,
+) -> int:
     """
-    根据 Qwen3-VL 官方规则计算图像 Token:
-    Token = (H_bar * W_bar) / (32 * 32) + 2
+    按 Qwen3-VL/Qwen3.5/3.6/3.7 官方 smart resize 规则估算图像 token。
+
+    图像 Token = resized_h * resized_w / (factor * factor) + 2。
+    实际账单仍以 API usage 为准。
     """
+    try:
+        return estimate_image_tokens(
+            image_path,
+            max_pixels=max_pixels,
+            min_pixels=min_pixels,
+            factor=factor,
+            vl_high_resolution_images=vl_high_resolution_images,
+        ).tokens
+    except Exception:
+        return fallback_tokens
+
+
+def estimate_image_tokens(
+    image_path,
+    *,
+    max_pixels: int = QWEN_VISION_DEFAULT_MAX_PIXELS,
+    min_pixels: int = QWEN_VISION_MIN_PIXELS,
+    factor: int = QWEN_VISION_FACTOR,
+    vl_high_resolution_images: bool = False,
+) -> ImageTokenEstimate:
     from PIL import Image
 
+    image_path = Path(image_path)
+    with Image.open(image_path) as img:
+        width, height = img.width, img.height
+    resized_h, resized_w, effective_max = smart_resize_dimensions(
+        height,
+        width,
+        max_pixels=max_pixels,
+        min_pixels=min_pixels,
+        factor=factor,
+        vl_high_resolution_images=vl_high_resolution_images,
+    )
+    tokens = int((resized_h * resized_w) / (factor * factor)) + 2
+    return ImageTokenEstimate(
+        width=width,
+        height=height,
+        resized_width=resized_w,
+        resized_height=resized_h,
+        tokens=tokens,
+        factor=factor,
+        token_pixels=factor * factor,
+        max_pixels=effective_max,
+        min_pixels=min_pixels,
+    )
+
+
+def smart_resize_dimensions(
+    height: int,
+    width: int,
+    *,
+    max_pixels: int = QWEN_VISION_DEFAULT_MAX_PIXELS,
+    min_pixels: int = QWEN_VISION_MIN_PIXELS,
+    factor: int = QWEN_VISION_FACTOR,
+    vl_high_resolution_images: bool = False,
+) -> tuple[int, int, int]:
+    """Return `(resized_height, resized_width, effective_max_pixels)`."""
+    if height <= 0 or width <= 0:
+        raise ValueError("image width and height must be positive")
+    if factor <= 0:
+        raise ValueError("factor must be positive")
+    if min_pixels <= 0 or max_pixels <= 0:
+        raise ValueError("pixel limits must be positive")
+    effective_max = 16384 * factor * factor if vl_high_resolution_images else max_pixels
+
+    h_bar = _round_by_factor(height, factor)
+    w_bar = _round_by_factor(width, factor)
+
+    if h_bar * w_bar > effective_max:
+        beta = math.sqrt((height * width) / effective_max)
+        h_bar = _floor_by_factor(height / beta, factor)
+        w_bar = _floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = _ceil_by_factor(height * beta, factor)
+        w_bar = _ceil_by_factor(width * beta, factor)
+    return max(factor, h_bar), max(factor, w_bar), effective_max
+
+
+def _round_by_factor(number: float, factor: int) -> int:
+    return int(round(number / factor) * factor)
+
+
+def _ceil_by_factor(number: float, factor: int) -> int:
+    return int(math.ceil(number / factor) * factor)
+
+
+def _floor_by_factor(number: float, factor: int) -> int:
+    return int(math.floor(number / factor) * factor)
+
+
+def estimate_deepseek_text_tokens(text: str, *, fallback: bool = True) -> int:
+    """Estimate DeepSeek text tokens using the bundled official tokenizer."""
     try:
-        with Image.open(image_path) as img:
-            height = img.height
-            width = img.width
-
-            h_bar = round(height / 32) * 32
-            w_bar = round(width / 32) * 32
-
-            return int((h_bar * w_bar) / 1024) + 2
+        return count_text_tokens(text or "")
     except Exception:
-        return 2000
+        if not fallback:
+            raise
+        return heuristic_text_tokens(text or "")
+
+
+def estimate_deepseek_chat_tokens(messages: list[dict], *, fallback: bool = True) -> int:
+    """Estimate DeepSeek chat prompt tokens with the app's simple user-message calls."""
+    try:
+        return count_chat_tokens(messages, add_generation_prompt=True)
+    except Exception:
+        if not fallback:
+            raise
+        return heuristic_text_tokens("\n".join(str(message.get("content") or "") for message in messages))
 
 
 def estimate_price(model_type, input_tokens, output_tokens):

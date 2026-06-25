@@ -46,3 +46,22 @@ def test_mineru_fixture_adapts_to_page_ir_contract():
     figure_blocks = [block for block in first_page["blocks"] if block["type"] == "figure_note"]
     assert figure_blocks
     assert "sample_fig.svg" in figure_blocks[0]["crop_ref"]
+
+
+def test_mineru_adapter_normalizes_unicode_math_in_text_blocks(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    write_json = artifact / "sample_content_list_v2.json"
+    write_json.write_text(
+        '[{"page_idx":0,"type":"paragraph","content":{"paragraph_content":[{"type":"text","content":"令 φ, θ, ω 满足 α+β=γ。"}]}}]',
+        encoding="utf-8",
+    )
+
+    document_ir = load_mineru_document_ir(artifact, engine_mode="mineru_only")
+    text = document_ir["pages"][0]["blocks"][0]["text"]
+
+    assert "$\\phi, \\theta, \\omega$" in text
+    assert "$\\alpha + \\beta = \\gamma$" in text
+    assert "φ" not in text
+    assert "θ" not in text
+    assert "ω" not in text

@@ -19,6 +19,177 @@ _TRAILING_QUAD_NUMBER_RE = re.compile(
 _DISPLAY_MATH_RE = re.compile(r"\$\$(.*?)\$\$", flags=re.DOTALL)
 _BRACKET_DISPLAY_RE = re.compile(r"\\\[(.*?)\\\]", flags=re.DOTALL)
 _CODE_FENCE_RE = re.compile(r"```.*?```", flags=re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_MATH_SPAN_RE = re.compile(
+    r"\$\$(?P<display>.*?)\$\$"
+    r"|(?<!\\)(?<!\$)\$(?!\$)(?P<inline>.*?)(?<!\\)(?<!\$)\$(?!\$)"
+    r"|\\\((?P<paren>.*?)\\\)"
+    r"|\\\[(?P<bracket>.*?)\\\]",
+    flags=re.DOTALL,
+)
+
+UNICODE_MATH_SYMBOLS_TO_LATEX = {
+    "Α": r"A",
+    "Β": r"B",
+    "Γ": r"\Gamma",
+    "Δ": r"\Delta",
+    "Ε": r"E",
+    "Ζ": r"Z",
+    "Η": r"H",
+    "Θ": r"\Theta",
+    "Ι": r"I",
+    "Κ": r"K",
+    "Λ": r"\Lambda",
+    "Μ": r"M",
+    "Ν": r"N",
+    "Ξ": r"\Xi",
+    "Ο": r"O",
+    "Π": r"\Pi",
+    "Ρ": r"P",
+    "Σ": r"\Sigma",
+    "Τ": r"T",
+    "Υ": r"\Upsilon",
+    "Φ": r"\Phi",
+    "Χ": r"X",
+    "Ψ": r"\Psi",
+    "Ω": r"\Omega",
+    "α": r"\alpha",
+    "β": r"\beta",
+    "γ": r"\gamma",
+    "δ": r"\delta",
+    "ε": r"\epsilon",
+    "ζ": r"\zeta",
+    "η": r"\eta",
+    "θ": r"\theta",
+    "ι": r"\iota",
+    "κ": r"\kappa",
+    "λ": r"\lambda",
+    "μ": r"\mu",
+    "ν": r"\nu",
+    "ξ": r"\xi",
+    "ο": r"o",
+    "π": r"\pi",
+    "ρ": r"\rho",
+    "σ": r"\sigma",
+    "τ": r"\tau",
+    "υ": r"\upsilon",
+    "φ": r"\phi",
+    "χ": r"\chi",
+    "ψ": r"\psi",
+    "ω": r"\omega",
+    "ϕ": r"\phi",
+    "ϑ": r"\theta",
+    "ϵ": r"\epsilon",
+    "≤": r"\leq",
+    "≥": r"\geq",
+    "≠": r"\neq",
+    "≈": r"\approx",
+    "≃": r"\simeq",
+    "≅": r"\cong",
+    "≡": r"\equiv",
+    "∈": r"\in",
+    "∉": r"\notin",
+    "⊂": r"\subset",
+    "⊃": r"\supset",
+    "⊆": r"\subseteq",
+    "⊇": r"\supseteq",
+    "∪": r"\cup",
+    "∩": r"\cap",
+    "∅": r"\emptyset",
+    "∀": r"\forall",
+    "∃": r"\exists",
+    "∄": r"\nexists",
+    "∂": r"\partial",
+    "∇": r"\nabla",
+    "∞": r"\infty",
+    "±": r"\pm",
+    "∓": r"\mp",
+    "×": r"\times",
+    "÷": r"\div",
+    "·": r"\cdot",
+    "⋅": r"\cdot",
+    "√": r"\sqrt",
+    "∑": r"\sum",
+    "∏": r"\prod",
+    "∫": r"\int",
+    "∮": r"\oint",
+    "→": r"\to",
+    "←": r"\leftarrow",
+    "↔": r"\leftrightarrow",
+    "⇒": r"\Rightarrow",
+    "⇐": r"\Leftarrow",
+    "⇔": r"\Leftrightarrow",
+    "⊗": r"\otimes",
+    "⊕": r"\oplus",
+    "⊥": r"\perp",
+    "∥": r"\parallel",
+    "∝": r"\propto",
+    "∴": r"\therefore",
+    "∵": r"\because",
+    "′": r"^{\prime}",
+    "″": r"^{\prime\prime}",
+}
+
+UNICODE_MATH_SYMBOL_RE = re.compile("[" + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX)) + "]")
+_BINARY_UNICODE_MATH_OPERATORS = {
+    "≤",
+    "≥",
+    "≠",
+    "≈",
+    "≃",
+    "≅",
+    "≡",
+    "∈",
+    "∉",
+    "⊂",
+    "⊃",
+    "⊆",
+    "⊇",
+    "→",
+    "←",
+    "↔",
+    "⇒",
+    "⇐",
+    "⇔",
+}
+_MATH_ATOM_RE = r"(?:[A-Za-z0-9_{}^\\]+|[" + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX)) + r"])"
+_MATH_CHAIN_TERM_RE = r"(?:[A-Za-z0-9_{}^\\]+|\?)"
+_UNICODE_MATH_CHAIN_RE = re.compile(
+    r"(?<![A-Za-z0-9_\\$])"
+    r"(?P<expr>"
+    + _MATH_CHAIN_TERM_RE
+    + r"(?:\s*[" + re.escape("".join(_BINARY_UNICODE_MATH_OPERATORS)) + r"]\s*" + _MATH_CHAIN_TERM_RE + r"){2,}"
+    r")"
+    r"(?![A-Za-z0-9_\\$])"
+)
+_COMPACT_BINARY_UNICODE_MATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_\\$])"
+    r"(?P<left>" + _MATH_ATOM_RE + r")"
+    r"\s*(?P<op>[" + re.escape("".join(_BINARY_UNICODE_MATH_OPERATORS)) + r"])\s*"
+    r"(?P<right>" + _MATH_ATOM_RE + r")"
+    r"(?![A-Za-z0-9_\\$])"
+)
+_SINGLE_UNICODE_MATH_SYMBOL_RE = re.compile(
+    r"(?<![A-Za-z0-9_\\$])"
+    r"(?P<symbol>[" + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX)) + r"])"
+    r"(?![A-Za-z0-9_\\$])"
+)
+_NATURAL_LANGUAGE_FRAGMENT_RE = re.compile(
+    r"\b(?:and|or|possible|typo|might|could|would|should|maybe|text|figure|label|arrow)\b",
+    flags=re.IGNORECASE,
+)
+_INLINE_MATHISH_FRAGMENT_RE = re.compile(
+    r"(?<![A-Za-z\\])"
+    r"(?P<expr>[A-Za-z0-9_{}^()\\+\-*/=<>|, \t"
+    + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX))
+    + r"]{0,80}"
+    + r"["
+    + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX))
+    + r"]"
+    + r"[A-Za-z0-9_{}^()\\+\-*/=<>|, \t"
+    + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX))
+    + r"]{0,80})"
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +261,7 @@ def assess_formula_text(text: str) -> FormulaQualityResult:
 def normalize_formula_text(text: str) -> str:
     stripped = (text or "").strip()
     stripped = _strip_outer_formula_delimiters(stripped)
+    stripped = normalize_unicode_math_symbols(stripped)
     stripped = _normalize_alignment_environments(stripped)
     stripped = _normalize_trailing_equation_number(stripped)
     return stripped.strip()
@@ -117,6 +289,49 @@ def formula_markup_needs_normalize(text: str) -> bool:
 
 def markdown_formula_markup_needs_normalize(markdown: str) -> bool:
     return normalize_markdown_formula_blocks(markdown or "") != (markdown or "")
+
+
+def normalize_unicode_math_symbols(text: str) -> str:
+    if not text:
+        return ""
+    if not contains_unicode_math_symbols(text):
+        return text
+    normalized = UNICODE_MATH_SYMBOL_RE.sub(lambda match: _latex_symbol_replacement(match.group(0)), text)
+    normalized = _format_basic_latex_operators(normalized)
+    return _cleanup_latex_symbol_spacing(normalized)
+
+
+def contains_unicode_math_symbols(text: str) -> bool:
+    return bool(UNICODE_MATH_SYMBOL_RE.search(text or ""))
+
+
+def unicode_math_symbols_in_text(text: str) -> list[str]:
+    seen = []
+    for match in UNICODE_MATH_SYMBOL_RE.finditer(text or ""):
+        symbol = match.group(0)
+        if symbol not in seen:
+            seen.append(symbol)
+    return seen
+
+
+def normalize_inline_math_text(text: str) -> str:
+    """Normalize obvious inline math while leaving code spans/fences untouched."""
+    if not text:
+        return ""
+    return normalize_markdown_formula_blocks(text)
+
+
+def strip_math_and_code_regions(text: str) -> str:
+    if not text:
+        return ""
+    without_fences = _CODE_FENCE_RE.sub("", text)
+    without_code = _CODE_SPAN_RE.sub("", without_fences)
+    return _MATH_SPAN_RE.sub("", without_code)
+
+
+def normalize_text_for_math_coverage(text: str) -> str:
+    normalized = normalize_unicode_math_symbols(text or "")
+    return normalized.replace("\\", "")
 
 
 def _strip_outer_formula_delimiters(text: str) -> str:
@@ -225,7 +440,8 @@ def _normalize_trailing_equation_number(text: str) -> str:
 
 def _normalize_markdown_formula_segment(markdown: str) -> str:
     text = _BRACKET_DISPLAY_RE.sub(lambda match: _format_display_math(normalize_formula_text(match.group(1))), markdown)
-    return _DISPLAY_MATH_RE.sub(lambda match: _normalize_display_match(match), text)
+    text = _DISPLAY_MATH_RE.sub(lambda match: _normalize_display_match(match), text)
+    return _normalize_inline_math_segment(text)
 
 
 def _normalize_display_match(match: re.Match) -> str:
@@ -234,6 +450,136 @@ def _normalize_display_match(match: re.Match) -> str:
     if normalized == original.strip():
         return match.group(0)
     return _format_display_math(normalized)
+
+
+def _normalize_inline_math_segment(text: str) -> str:
+    if not text:
+        return ""
+    pieces = _CODE_SPAN_RE.split(text)
+    code_spans = _CODE_SPAN_RE.findall(text)
+    rendered = []
+    for index, piece in enumerate(pieces):
+        rendered.append(_normalize_inline_math_piece(piece))
+        if index < len(code_spans):
+            rendered.append(code_spans[index])
+    return "".join(rendered)
+
+
+def _normalize_inline_math_piece(text: str) -> str:
+    normalized_math = _MATH_SPAN_RE.sub(_normalize_math_delimited_match, text)
+    return _wrap_bare_unicode_math_fragments(normalized_math)
+
+
+def _normalize_math_delimited_match(match: re.Match) -> str:
+    if match.group("display") is not None:
+        return match.group(0)
+    if match.group("inline") is not None:
+        return f"${normalize_formula_text(match.group('inline'))}$"
+    if match.group("paren") is not None:
+        return f"\\({normalize_formula_text(match.group('paren'))}\\)"
+    return _format_display_math(normalize_formula_text(match.group("bracket") or ""))
+
+
+def _wrap_bare_unicode_math_fragments(text: str) -> str:
+    if not contains_unicode_math_symbols(text):
+        return text
+    text = _wrap_unicode_math_chains(text)
+    if not contains_unicode_math_symbols(text):
+        return text
+    text = _wrap_compact_binary_unicode_math_fragments(text)
+    if not contains_unicode_math_symbols(text):
+        return text
+
+    def replace(match: re.Match) -> str:
+        expr = match.group("expr")
+        if not _looks_like_bare_math_fragment(expr):
+            return expr
+        leading = expr[: len(expr) - len(expr.lstrip())]
+        trailing = expr[len(expr.rstrip()) :]
+        core = expr.strip()
+        return f"{leading}${normalize_unicode_math_symbols(core).strip()}${trailing}"
+
+    text = _INLINE_MATHISH_FRAGMENT_RE.sub(replace, text)
+    if not contains_unicode_math_symbols(text):
+        return text
+    return _wrap_single_unicode_math_symbols(text)
+
+
+def _wrap_unicode_math_chains(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        return f"${_normalize_unicode_operator_chain(match.group('expr'))}$"
+
+    return _UNICODE_MATH_CHAIN_RE.sub(replace, text)
+
+
+def _wrap_compact_binary_unicode_math_fragments(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        left = normalize_unicode_math_symbols(match.group("left")).strip()
+        operator = UNICODE_MATH_SYMBOLS_TO_LATEX.get(match.group("op"), match.group("op")).strip()
+        right = normalize_unicode_math_symbols(match.group("right")).strip()
+        return f"${left} {operator} {right}$"
+
+    return _COMPACT_BINARY_UNICODE_MATH_RE.sub(replace, text)
+
+
+def _normalize_unicode_operator_chain(expr: str) -> str:
+    parts = re.split(r"([" + re.escape("".join(_BINARY_UNICODE_MATH_OPERATORS)) + r"])", expr)
+    rendered: list[str] = []
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        if stripped in UNICODE_MATH_SYMBOLS_TO_LATEX:
+            rendered.append(UNICODE_MATH_SYMBOLS_TO_LATEX[stripped])
+        else:
+            rendered.append(normalize_unicode_math_symbols(stripped).strip())
+    return " ".join(rendered)
+
+
+def _wrap_single_unicode_math_symbols(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        symbol = match.group("symbol")
+        return f"${normalize_unicode_math_symbols(symbol).strip()}$"
+
+    return _SINGLE_UNICODE_MATH_SYMBOL_RE.sub(replace, text)
+
+
+def _looks_like_bare_math_fragment(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or not contains_unicode_math_symbols(stripped):
+        return False
+    if len(stripped) > 96:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", stripped):
+        return False
+    if _NATURAL_LANGUAGE_FRAGMENT_RE.search(stripped):
+        return False
+    return bool(
+        re.search(r"[=+\-*/^_{}()<>|]", stripped)
+        or len(UNICODE_MATH_SYMBOL_RE.findall(stripped)) >= 2
+        or re.fullmatch(r"[A-Za-z0-9_{}^()\\+\-*/=<>|, \t" + re.escape("".join(UNICODE_MATH_SYMBOLS_TO_LATEX)) + r"]+", stripped)
+    )
+
+
+def _latex_symbol_replacement(symbol: str) -> str:
+    latex = UNICODE_MATH_SYMBOLS_TO_LATEX.get(symbol, symbol)
+    if not latex.startswith("\\"):
+        return latex
+    return f"{latex} "
+
+
+def _cleanup_latex_symbol_spacing(text: str) -> str:
+    cleaned = re.sub(r"(\\[A-Za-z]+)\s+([_^{}.,;:，。；：)\]])", r"\1\2", text)
+    cleaned = re.sub(r"(\\[A-Za-z]+)\s+([+\-*/=<>|])", r"\1 \2", cleaned)
+    return cleaned
+
+
+def _format_basic_latex_operators(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"(?<![&])\s*\+\s*", " + ", text)
+    text = re.sub(r"(?<![&])\s*=\s*", " = ", text)
+    return text.strip()
 
 
 def format_display_math(latex: str) -> str:

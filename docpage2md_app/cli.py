@@ -56,6 +56,16 @@ def parse_args(argv=None):
         default="balanced",
         help="模型档位；hybrid 默认 balanced，复杂文档可选 accurate",
     )
+    parser.add_argument("--vision-provider", type=str, default=None, help="非交互覆盖 Vision provider")
+    parser.add_argument("--vision-model", type=str, default=None, help="非交互覆盖 Vision 模型 ID")
+    parser.add_argument("--vision-base-url", type=str, default=None, help="非交互覆盖 Vision Base URL")
+    parser.add_argument("--vision-api-key-env", type=str, default=None, help="非交互覆盖 Vision API Key 环境变量名")
+    parser.add_argument("--brain-provider", type=str, default=None, help="非交互覆盖 Brain provider")
+    parser.add_argument("--brain-model", type=str, default=None, help="非交互覆盖 Brain 模型 ID")
+    parser.add_argument("--brain-base-url", type=str, default=None, help="非交互覆盖 Brain Base URL")
+    parser.add_argument("--brain-api-key-env", type=str, default=None, help="非交互覆盖 Brain API Key 环境变量名")
+    parser.add_argument("--vision-workers", type=int, default=None, help="Vision/crop Vision 并发数，默认使用配置值")
+    parser.add_argument("--brain-workers", type=int, default=None, help="Brain/refiner 页级并发数，默认使用配置值")
     parser.add_argument("--input-file", type=str, default=None, help="通过 MinerU API 解析的本地 PDF/Office/图片文件")
     parser.add_argument(
         "--input-files",
@@ -127,6 +137,8 @@ def ensure_dependencies():
 
 
 def build_config(args):
+    vision_workers = _positive_optional_int(args.vision_workers, "--vision-workers") or AppConfig().vision_batch_workers
+    brain_workers = _positive_optional_int(args.brain_workers, "--brain-workers") or AppConfig().brain_batch_workers
     config = AppConfig(
         session_name=args.name,
         output_folder=str(Path(args.output).resolve()),
@@ -141,13 +153,45 @@ def build_config(args):
         model_cache_path=args.model_cache,
         verify_limit=args.verify_limit,
         verify_sleep=args.verify_sleep,
+        vision_batch_workers=vision_workers,
+        brain_batch_workers=brain_workers,
         list_models=args.list_models,
         list_all_models=args.list_all_models,
         refresh_models=args.refresh_models,
         verify_models=args.verify_models,
         fix_ocr_confusion=args.fix_ocr_confusion,
     )
-    return apply_model_profile(config, args.model_profile)
+    config = apply_model_profile(config, args.model_profile)
+    return _apply_explicit_model_overrides(config, args)
+
+
+def _positive_optional_int(value: int | None, label: str) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        raise ValueError(f"{label} must be a positive integer.")
+    return value
+
+
+def _apply_explicit_model_overrides(config: AppConfig, args) -> AppConfig:
+    updates = {}
+    mapping = {
+        "vision_provider": "vision_provider",
+        "vision_model": "model_vision",
+        "vision_base_url": "vision_base_url",
+        "vision_api_key_env": "vision_api_key_env",
+        "brain_provider": "brain_provider",
+        "brain_model": "model_brain",
+        "brain_base_url": "brain_base_url",
+        "brain_api_key_env": "brain_api_key_env",
+    }
+    for arg_name, config_name in mapping.items():
+        value = getattr(args, arg_name, None)
+        if value:
+            updates[config_name] = value
+    if not updates:
+        return config
+    return replace(config, **updates)
 
 
 def configure_stdio():
@@ -558,7 +602,7 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
             source_path=args.input_file,
             progress=run_logger,
         )
-        print(f"MinerU artifact processed: {result['page_count']} pages -> {result['output_dir']}")
+        print(f"MinerU artifact 处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
         return 0
 
     try:
@@ -568,7 +612,7 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
         return 2
 
     if not args.mineru_url and not local_files:
-        print("MinerU mode requires --mineru-artifact-dir, --mineru-url, --input-file, --input-files, or --input-folder.")
+        print("MinerU 主流程缺少输入来源：请指定 --mineru-artifact-dir、--mineru-url、--input-file、--input-files 或 --input-folder。")
         return 2
     try:
         client = MinerUClient(config, progress=run_logger)
@@ -590,7 +634,7 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
                 task_ref={"task_id": task_id, "batch_id": None},
                 progress=run_logger,
             )
-            print(f"MinerU API processed: {processed['page_count']} pages -> {processed['output_dir']}")
+            print(f"MinerU API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
             return 0
 
         safe_progress(
@@ -617,12 +661,12 @@ def _run_mineru_cli(args, config: AppConfig) -> int:
                 progress=run_logger,
             )
             processed_count += 1
-            print(f"MinerU API processed: {processed['page_count']} pages -> {processed['output_dir']}")
-        print(f"MinerU batch complete: {processed_count}/{len(local_files)} files")
+            print(f"MinerU API 处理完成：共 {processed['page_count']} 页 -> {processed['output_dir']}")
+        print(f"MinerU 批量任务完成：{processed_count}/{len(local_files)} 个文件")
         return 0
     except MinerUError as exc:
         safe_progress(run_logger, f"MinerU API failed: {exc}")
-        print(f"MinerU API failed: {exc}")
+        print(f"MinerU API 失败：{exc}")
         return 1
 
 
@@ -641,6 +685,7 @@ def _download_and_process_mineru_result(
     from .mineru_cache import cache_key_for_source, task_cache_dir, unzip_mineru_result, write_task_manifest
     from .mineru_pipeline import process_mineru_artifact_task
 
+    progress = _per_document_progress(config, args, source, doc_name, progress)
     cache_key = cache_key_for_source(source, page_ranges=args.page_ranges, model_version=config.mineru_model_version)
     cache_dir = task_cache_dir(config.output_folder, cache_key)
     zip_path = cache_dir / "mineru_result.zip"
@@ -672,6 +717,21 @@ def _download_and_process_mineru_result(
         source_path=source,
         progress=progress,
     )
+
+
+def _per_document_progress(config: AppConfig, args, source: str, doc_name: str | None, progress):
+    output_name = doc_name or _source_output_name(source)
+    doc_log_path = Path(config.output_folder) / output_name / "process.log"
+    shared_log_path = _mineru_process_log_path(config, args, doc_name)
+    if progress is None or doc_log_path.resolve() == shared_log_path.resolve():
+        return progress
+    doc_logger = RunLogger(doc_log_path, echo=False)
+
+    def tee(message: str) -> None:
+        safe_progress(progress, message)
+        safe_progress(doc_logger, message)
+
+    return tee
 
 
 def _resolve_mineru_local_files(args) -> list[Path]:
@@ -741,6 +801,14 @@ def _mineru_log_output_name(args, doc_name: str | None) -> str:
     if args.input_files:
         return "mineru_batch"
     return "mineru_task"
+
+
+def _source_output_name(source: str) -> str:
+    parsed = urllib.parse.urlsplit(str(source))
+    if parsed.scheme and parsed.netloc:
+        stem = Path(parsed.path).stem
+        return stem or "mineru_url_task"
+    return Path(str(source)).stem or "mineru_task"
 
 
 def _safe_source_label(source: str) -> str:

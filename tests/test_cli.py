@@ -60,6 +60,121 @@ def test_cli_build_config_exposes_mineru_multiformat_options(tmp_path):
     assert config.brain_provider == "deepseek"
 
 
+def test_cli_explicit_model_overrides_win_over_profile(tmp_path):
+    args = cli.parse_args(
+        [
+            "--model-profile",
+            "balanced",
+            "--vision-provider",
+            "openai_compatible",
+            "--vision-model",
+            "custom-vision",
+            "--vision-base-url",
+            "https://vision.example/v1",
+            "--vision-api-key-env",
+            "VISION_KEY",
+            "--brain-provider",
+            "openai_compatible",
+            "--brain-model",
+            "custom-brain",
+            "--brain-base-url",
+            "https://brain.example/v1",
+            "--brain-api-key-env",
+            "BRAIN_KEY",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+
+    config = cli.build_config(args)
+
+    assert config.model_profile == "balanced"
+    assert config.vision_provider == "openai_compatible"
+    assert config.model_vision == "custom-vision"
+    assert config.vision_base_url == "https://vision.example/v1"
+    assert config.vision_api_key_env == "VISION_KEY"
+    assert config.brain_provider == "openai_compatible"
+    assert config.model_brain == "custom-brain"
+    assert config.brain_base_url == "https://brain.example/v1"
+    assert config.brain_api_key_env == "BRAIN_KEY"
+
+
+def test_cli_manual_profile_accepts_explicit_model_overrides(tmp_path):
+    args = cli.parse_args(
+        [
+            "--model-profile",
+            "manual",
+            "--vision-provider",
+            "dashscope_openai",
+            "--vision-model",
+            "qwen3.7-plus",
+            "--brain-provider",
+            "deepseek",
+            "--brain-model",
+            "deepseek-v4-pro",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+
+    config = cli.build_config(args)
+
+    assert config.model_profile == "manual"
+    assert config.vision_provider == "dashscope_openai"
+    assert config.model_vision == "qwen3.7-plus"
+    assert config.brain_provider == "deepseek"
+    assert config.model_brain == "deepseek-v4-pro"
+
+
+def test_mineru_batch_processing_writes_per_document_process_log(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    source = tmp_path / "notes.pdf"
+    source.write_bytes(b"%PDF fake")
+    args = cli.parse_args(["--input-files", str(source), "--output", str(tmp_path / "out")])
+    config = cli.build_config(args)
+
+    class FakeClient:
+        def download_zip(self, _url, zip_path):
+            zip_path.write_bytes(b"zip")
+
+    class FakeResult:
+        full_zip_url = "https://example.com/result.zip"
+        task_id = "task-1"
+        file_name = "notes.pdf"
+        data_id = "data-1"
+
+    monkeypatch.setattr("docpage2md_app.mineru_cache.unzip_mineru_result", lambda _zip, dest: dest.mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr("docpage2md_app.mineru_cache.write_task_manifest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "docpage2md_app.mineru_pipeline.process_mineru_artifact_task",
+        lambda artifact_dir, config, doc_name, engine_mode, source_path, progress: (
+            progress("DocumentIR ready: pages=1, blocks=1") or {
+                "page_count": 1,
+                "output_dir": str(tmp_path / "out" / "notes"),
+            }
+        ),
+    )
+    shared_logger = cli.RunLogger(tmp_path / "out" / "mineru_batch" / "process.log", echo=False)
+
+    cli._download_and_process_mineru_result(
+        FakeClient(),
+        FakeResult(),
+        source=str(source),
+        config=config,
+        args=args,
+        mode="hybrid",
+        doc_name=None,
+        task_ref={"task_id": "task-1", "batch_id": "batch-1"},
+        progress=shared_logger,
+    )
+
+    per_doc_log = tmp_path / "out" / "notes" / "process.log"
+    assert per_doc_log.exists()
+    assert "文档结构已就绪：共 1 页" in per_doc_log.read_text(encoding="utf-8")
+    assert "文档结构已就绪：共 1 页" in (tmp_path / "out" / "mineru_batch" / "process.log").read_text(encoding="utf-8")
+
+
 def test_cli_resolves_mineru_folder_batch_inputs(tmp_path):
     keep_pdf = tmp_path / "a.pdf"
     keep_docx = tmp_path / "b.docx"
@@ -99,7 +214,7 @@ def test_cli_missing_mineru_token_returns_clean_error(monkeypatch, tmp_path, cap
 
     captured = capsys.readouterr()
     assert code == 1
-    assert "MinerU API failed" in captured.out
+    assert "MinerU API 失败" in captured.out
     assert "MINERU_API_TOKEN" in captured.out
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err

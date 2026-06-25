@@ -48,6 +48,7 @@
 - 用户逐个 role 选择 provider、model、base_url、api_key_env。
 - 支持 OpenAI-compatible 第三方 API。
 - 支持把视觉、Brain、refiner 全部切到第三方服务。
+- GUI 启动任务时会把当前 Vision/Brain 选择写成 CLI 覆盖参数，避免子进程进入终端 `input()`。
 
 ## 数据结构
 
@@ -90,6 +91,52 @@ Model
   supports_reasoning_content
 ```
 
+## 非交互覆盖参数
+
+GUI 和自动化脚本可以用显式参数覆盖档位默认模型：
+
+```powershell
+python docpage2md.py --engine-mode hybrid --model-profile manual `
+  --vision-provider openai_compatible `
+  --vision-model "vendor/vision-model" `
+  --vision-base-url "https://example.com/v1" `
+  --vision-api-key-env "VENDOR_API_KEY" `
+  --brain-provider deepseek `
+  --brain-model "deepseek-v4-flash" `
+  --brain-base-url "https://api.deepseek.com" `
+  --brain-api-key-env "DEEPSEEK_API_KEY" `
+  --input-file ".\input_docs\notes.pdf"
+```
+
+构造顺序是：先应用 `--model-profile`，再应用这些显式覆盖。这样 `cheap / balanced / accurate` 可以被局部覆盖，`manual` 也能完整构造 `AppConfig`。
+
+## GUI 模型管理
+
+当前 Tkinter GUI 的模型页提供：
+
+- 当前生效 Vision / Brain 模型编辑。
+- 官方模型候选列表，来自 `load_model_catalog()`。
+- 第三方模型新增、编辑、删除、选择和批量导入。
+- API Key 环境变量检查。
+- Windows 用户环境变量写入。
+- 第三方模型验证，并把验证状态写回 `log/third_party_models.json`。
+
+第三方模型 registry 只保存：
+
+```text
+provider
+model_id
+base_url
+api_key_env
+roles
+supports_vision
+input_price
+output_price
+verification
+```
+
+不保存真实 API Key。坏 registry 文件不会被静默覆盖，必须先人工修复。
+
 ## 安全约束
 
 - 配置文件、缓存、report 只允许保存环境变量名，不保存 key 值。
@@ -105,3 +152,5 @@ Model
 - `docs/reference-pricing/模型调用计费2026.6.23.md`
 
 联网刷新或导入复制版价格页应作为显式命令，不在主流程自动执行。
+
+GUI 成本估算使用模型目录里的离线价格和用户录入的第三方价格。对于本地 PDF/Office 文件，MinerU 返回前只能按页数和经验 crop 数估算；已有 MinerU artifact 可以读取真实 crop 图片尺寸，估算更可靠。
