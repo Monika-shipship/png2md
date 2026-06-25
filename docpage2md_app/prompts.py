@@ -121,7 +121,7 @@ PROMPT_STAGE_2_BRAIN = r"""
    - 一个 `$$ ... $$` display math 内最多一个 `\tag{{n}}`。如果 [Target] 中连续出现多个带编号公式，请拆成多个独立 display math，不要塞进同一个 `aligned`。
 3. **Figure 整合**：检查 [Target] 中是否有 `### Figure Analysis` 区块。
    - 如果有，请在 Markdown 中将其整理为默认折叠的 HTML `<details>` 块，不要使用 `> [!NOTE]`。
-   - 兼容格式必须是：`<details>`、`<summary>图示识别内容</summary>`、空行、若干 Markdown 列表项、空行、`</details>`。
+   - 兼容格式必须是：`<details>`、若干 Markdown 列表项、`<summary>图示识别内容</summary>`、空行、`</details>`；默认关闭，不要使用 `open`。
    - Figure 描述也只能来自 [Target] 的 Figure Analysis，不要根据前后页扩展图意。
 
 【输出要求】
@@ -137,9 +137,8 @@ PROMPT_STAGE_2_BRAIN = r"""
    - 如果当前页原文在页尾截断，输出也在相同位置停止。
    - **图像描述**（如果有）：
      <details>
-     <summary>图示识别内容</summary>
-
      - 说明：(在此处放入整理后的图像几何描述，方便后续 TikZ 绘图)
+     <summary>图示识别内容</summary>
 
      </details>
 

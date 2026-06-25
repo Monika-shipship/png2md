@@ -185,14 +185,14 @@ User Markdown must not contain:
 - provider raw errors
 - validator diagnostics
 - model reasoning or `reasoning_content`
+- dual-engine candidate labels such as `[mineru] ...` or `[paddleocr] ...`; those belong only in IR/report evidence, never final Markdown.
 
 Typora-compatible figure details are default-closed:
 
 ```markdown
 <details>
+    - 说明：...
 <summary>图示识别内容</summary>
-
-- 说明：...
 
 </details>
 ```

@@ -9,12 +9,11 @@ F = ma
 $$
 
 <details>
+    - 说明：
+      - 左侧是 A。
+      - 右侧是 B。
+    - 可见标签：A，B
 <summary>图示识别内容</summary>
-
-- 说明：
-  - 左侧是 A。
-  - 右侧是 B。
-- 可见标签：A，B
 
 </details>
 

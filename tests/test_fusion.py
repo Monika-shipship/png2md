@@ -2,6 +2,7 @@ from copy import deepcopy
 
 from docpage2md_app.fusion import apply_fusion_ops, build_candidate_groups, fuse_document_irs
 from docpage2md_app.fusion_prompt import build_fusion_decision_prompt
+from docpage2md_app.renderer import render_page_ir_to_markdown
 
 
 def _block(block_id, block_type, text, bbox, *, source_page=1, confidence=0.8, image_ref=None):
@@ -125,6 +126,67 @@ def test_default_fusion_prefers_richer_similar_candidate():
     page = result.document_ir["pages"][0]
     assert "结合律" in page["blocks"][0]["text"]
     assert page["blocks"][0]["source_engine"] == "paddleocr"
+
+
+def test_default_fusion_formula_conflict_renders_one_formula_candidate():
+    mineru = _page(
+        2,
+        [
+            _block(
+                "p0002-b001",
+                "formula_block",
+                r"\mathrm{如} SO(2) \quad 0, 2\pi, 4\pi, -2\pi, \dots \mathrm{都可}",
+                [10, 10, 320, 60],
+                source_page=2,
+                confidence=0.7,
+            )
+        ],
+    )
+    paddle = _page(
+        2,
+        [
+            _block(
+                "p0002-b001",
+                "paragraph",
+                r"即 f(d,d)=f(d,d)=\alpha_0。",
+                [10, 10, 320, 60],
+                source_page=2,
+                confidence=0.86,
+            )
+        ],
+    )
+
+    result = fuse_document_irs(_document([mineru], engine="mineru"), _document([paddle], engine="paddleocr"))
+    page = result.document_ir["pages"][0]
+    markdown = render_page_ir_to_markdown(page, 2)
+
+    assert page["blocks"][0]["type"] == "formula_block"
+    assert page["blocks"][0]["source_engine"] == "mineru"
+    assert r"\mathrm{如} SO(2)" in markdown
+    assert "$$" in markdown
+    assert "[mineru]" not in markdown.lower()
+    assert "[paddleocr]" not in markdown.lower()
+
+
+def test_mark_uncertain_keeps_candidate_comparison_out_of_markdown():
+    mineru = _page(1, [_block("p0001-b001", "paragraph", "第一种解释保留为正文。", [10, 10, 200, 40], confidence=0.8)])
+    paddle = _page(1, [_block("p0001-b001", "paragraph", "另一份识别结果差异很大。", [10, 10, 200, 40], confidence=0.8)])
+    groups = build_candidate_groups(mineru, paddle, page_no=1)
+
+    page_ir, report = apply_fusion_ops(
+        mineru,
+        paddle,
+        groups,
+        [{"action": "mark_uncertain", "target_group": groups[0]["group_id"], "reason": "fixture_conflict"}],
+        page_no=1,
+    )
+    markdown = render_page_ir_to_markdown(page_ir, 1)
+
+    assert report["decisions"][0]["action"] == "mark_uncertain"
+    assert page_ir["blocks"][0]["text"] in markdown
+    assert "[mineru]" not in markdown.lower()
+    assert "[paddleocr]" not in markdown.lower()
+    assert page_ir["blocks"][0]["evidence"]["uncertain_resolution"]["candidate_ids"]
 
 
 def test_apply_fusion_ops_rejects_bad_action_and_keeps_candidates():

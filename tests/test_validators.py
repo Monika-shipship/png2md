@@ -135,9 +135,19 @@ def test_figure_analysis_without_note_warns():
     assert [issue.code for issue in result.warnings] == ["figure_note_missing"]
 
 
+def test_dual_candidate_labels_are_errors():
+    result = validate_slide_markdown(
+        "# Slide 2\n\n[mineru] $a=b$\n\n[paddleocr] $a=c$\n",
+        2,
+    )
+
+    assert not result.ok
+    assert "dual_candidate_label_leak" in {issue.code for issue in result.errors}
+
+
 def test_chinese_figure_note_satisfies_figure_analysis():
     result = validate_slide_markdown(
-        "# Slide 1\n\n<details>\n<summary>图示识别内容</summary>\n\n- 说明：图中左侧是 A。\n\n</details>\n",
+        "# Slide 1\n\n<details>\n    - 说明：图中左侧是 A。\n<summary>图示识别内容</summary>\n\n</details>\n",
         1,
         target_raw="### Figure Analysis\n图中左侧是 A。",
     )
@@ -148,7 +158,7 @@ def test_chinese_figure_note_satisfies_figure_analysis():
 
 def test_figure_note_satisfies_figure_analysis():
     result = validate_slide_markdown(
-        "# Slide 1\n\n<details>\n<summary>图示识别内容</summary>\n\n- 说明：图中左侧区域被遮挡。\n\n</details>\n",
+        "# Slide 1\n\n<details>\n    - 说明：图中左侧区域被遮挡。\n<summary>图示识别内容</summary>\n\n</details>\n",
         1,
         target_raw="### Figure Analysis\n图中左侧区域被遮挡。",
     )
@@ -205,7 +215,7 @@ def test_present_target_figure_block_satisfies_block_coverage():
     ]
 
     result = validate_slide_markdown(
-        "# Slide 1\n\n<details>\n<summary>图示识别内容</summary>\n\n- 说明：坐标图中横轴为 t，纵轴为 v，曲线逐渐上升。\n\n</details>\n",
+        "# Slide 1\n\n<details>\n    - 说明：坐标图中横轴为 t，纵轴为 v，曲线逐渐上升。\n<summary>图示识别内容</summary>\n\n</details>\n",
         1,
         target_blocks=blocks,
     )

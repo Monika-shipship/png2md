@@ -218,7 +218,8 @@ def _detail_items(value: Any) -> list[str]:
 
 def _render_collapsible_details(summary: str, lines: list[str]) -> str:
     body = "\n".join(lines).strip()
-    return f"<details>\n<summary>{summary}</summary>\n\n{body}\n\n</details>"
+    indented_body = "\n".join(f"    {line}" if line else "" for line in body.splitlines())
+    return f"<details>\n{indented_body}\n<summary>{summary}</summary>\n\n</details>"
 
 
 def _remove_adjacent_duplicate_prefix(previous: str, current: str) -> str:

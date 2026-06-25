@@ -52,11 +52,11 @@ def test_render_page_ir_to_markdown_is_deterministic():
         "## 标题\n\n"
         "正文 $E=mc^2$\n\n"
         "<details>\n"
+        "    - 说明：\n"
+        "      - 左侧是 A。\n"
+        "      - 右侧是 B。\n"
+        "    - 可见标签：A，B\n"
         "<summary>图示识别内容</summary>\n\n"
-        "- 说明：\n"
-        "  - 左侧是 A。\n"
-        "  - 右侧是 B。\n"
-        "- 可见标签：A，B\n\n"
         "</details>\n"
     )
     assert "<details open" not in markdown
@@ -183,10 +183,10 @@ def test_unrecognizable_figure_renders_clean_text_without_warning_block():
     assert markdown == (
         "# Slide 10\n\n"
         "<details>\n"
+        "    - 说明：图示被遮挡，无法确定节点和箭头方向。\n"
+        "    - 主要关系：图示被遮挡，无法确定节点和箭头方向。\n"
+        "    - 不确定点：图示不可可靠识别。\n"
         "<summary>图示识别内容</summary>\n\n"
-        "- 说明：图示被遮挡，无法确定节点和箭头方向。\n"
-        "- 主要关系：图示被遮挡，无法确定节点和箭头方向。\n"
-        "- 不确定点：图示不可可靠识别。\n\n"
         "</details>\n"
     )
 
@@ -209,8 +209,8 @@ def test_figure_with_image_path_renders_markdown_image_reference():
         "# Slide 11\n\n"
         "![page 1 figure 1](assets/figures/page-1-figure-1.png)\n\n"
         "<details>\n"
+        "    - 说明：坐标图：横轴为 t，纵轴为 v。\n"
         "<summary>图示识别内容</summary>\n\n"
-        "- 说明：坐标图：横轴为 t，纵轴为 v。\n\n"
         "</details>\n"
     )
 

@@ -204,6 +204,18 @@ def propose_default_fusion_ops(groups: list[dict[str, Any]]) -> list[dict[str, A
         if _complementary_visual_text(candidates):
             ops.append({"action": "keep_both", "target_group": group_id, "reason": "visual_text_complementary"})
             continue
+        if _type_hint(candidates) == "formula_block":
+            preferred_formula = _best_formula_candidate(candidates) or best
+            if preferred_formula:
+                ops.append(
+                    {
+                        "action": "choose_block",
+                        "target_group": group_id,
+                        "source": preferred_formula.get("source"),
+                        "reason": "formula_conflict_choose_best_renderable",
+                    }
+                )
+                continue
         if _text_conflict(candidates):
             ops.append({"action": "mark_uncertain", "target_group": group_id, "reason": "candidate_text_conflict"})
             continue
@@ -436,26 +448,20 @@ def _apply_group_op(group: dict[str, Any], op: dict[str, Any], *, page_no: int) 
     if action == "keep_both":
         return [_block_from_candidate(candidate, page_no=page_no) for candidate in candidates], {"reason": "ok"}
     if action == "mark_uncertain":
-        text = "\n\n".join(
-            f"[{candidate.get('source')}] {candidate.get('text') or candidate.get('image_ref') or candidate.get('block_id')}"
-            for candidate in candidates
-            if candidate.get("text") or candidate.get("image_ref")
-        ).strip() or "双引擎候选差异较大，保守标记为不确定。"
-        block = {
-            "type": "uncertain",
-            "text": normalize_inline_math_text(text),
-            "source_page": page_no,
-            "confidence": 0.25,
-            "origin": "vision_uncertain",
-            "evidence": {
-                "raw_text": text,
-                "provider": "dual_fusion",
-                "fusion_action": "mark_uncertain",
-                "candidate_ids": [candidate.get("candidate_id") for candidate in candidates],
-            },
-            "bbox": _union_bbox([candidate.get("bbox") for candidate in candidates]),
-            "source_engine": "dual_fusion",
+        chosen = _best_uncertain_render_candidate(candidates)
+        if chosen is None:
+            return None, {"reason": "no_renderable_uncertain_candidate"}
+        block = _block_from_candidate(chosen, page_no=page_no)
+        evidence = block.setdefault("evidence", {})
+        evidence["fusion_action"] = "mark_uncertain"
+        evidence["uncertain_resolution"] = {
+            "chosen_source": chosen.get("source"),
+            "reason": op.get("reason") or "candidate_text_conflict",
+            "candidate_ids": [candidate.get("candidate_id") for candidate in candidates],
+            "candidates": [_audit_candidate(candidate) for candidate in candidates],
         }
+        block["confidence"] = min(_valid_confidence(block.get("confidence"), default=0.55), 0.62)
+        block["source_engine"] = chosen.get("source")
         return [block], {"reason": "ok"}
     if action == "merge_blocks":
         text = _safe_model_text(op.get("text"))
@@ -717,6 +723,51 @@ def _best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     score_best = max(candidates, key=lambda item: float(item.get("quality_score") or 0.0))
     richness_best = _richer_similar_candidate(candidates, score_best)
     return richness_best or score_best
+
+
+def _best_formula_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    formula_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("type") == "formula_block" and str(candidate.get("text") or "").strip()
+    ]
+    if not formula_candidates:
+        return None
+    return max(
+        formula_candidates,
+        key=lambda item: (
+            -_severe_warning_count(item),
+            float(item.get("quality_score") or 0.0),
+            len(_normalize_match_text(item.get("text") or "")),
+        ),
+    )
+
+
+def _best_uncertain_render_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    if _type_hint(candidates) == "formula_block":
+        formula = _best_formula_candidate(candidates)
+        if formula is not None:
+            return formula
+    text_candidates = [candidate for candidate in candidates if str(candidate.get("text") or "").strip()]
+    if text_candidates:
+        return _best_candidate(text_candidates)
+    return _first_image_candidate(candidates) or _best_candidate(candidates)
+
+
+def _audit_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.get("candidate_id"),
+        "source": candidate.get("source"),
+        "block_id": candidate.get("block_id"),
+        "type": candidate.get("type"),
+        "text": _safe_text(candidate.get("text"), 800),
+        "image_ref": candidate.get("image_ref"),
+        "quality_score": round(float(candidate.get("quality_score") or 0.0), 4),
+        "confidence": candidate.get("confidence"),
+        "warnings": candidate.get("warnings") or [],
+    }
 
 
 def _candidate_is_clearly_better(best: dict[str, Any], candidates: list[dict[str, Any]]) -> bool:
@@ -995,6 +1046,8 @@ def _safe_model_text(value: Any) -> str:
     if not text or is_api_error_text(text):
         return ""
     if re.search(r"(reasoning_content|Traceback|思考过程|推理过程)", text, flags=re.IGNORECASE):
+        return ""
+    if re.search(r"(?im)^\s*\[(?:mineru|paddleocr)\]\s+", text):
         return ""
     return text
 

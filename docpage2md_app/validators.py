@@ -135,6 +135,9 @@ def validate_slide_markdown(
     if re.search(r"</?CTX>", text, flags=re.IGNORECASE) or re.search(r"\[(?:P-\d|N\+\d|Target)\]", text):
         errors.append(_issue("ctx_marker_leak", "error", "输出泄漏了内部上下文标记。", slide_no))
 
+    if re.search(r"(?im)^\s*\[(?:mineru|paddleocr)\]\s+", text):
+        errors.append(_issue("dual_candidate_label_leak", "error", "最终 Markdown 泄漏了双引擎候选标签，应只保留裁决后的正文。", slide_no))
+
     if _is_whole_document_fenced(stripped):
         errors.append(_issue("whole_document_code_fence", "error", "最终 Markdown 仍被代码围栏包裹全文。", slide_no))
 
