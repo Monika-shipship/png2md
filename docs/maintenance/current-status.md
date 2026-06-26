@@ -9,6 +9,7 @@ Last updated: 2026-06-26
 - GUI entrypoints: `python docpage2md_gui.py`, `python -m docpage2md_app.gui`
 - Importable package: `docpage2md_app`
 - Main branch under active work: `main`
+- App version: `0.1.0`
 - Legacy image-folder input directory: `doc_pages/`
 - Optional local private input directory: `input_docs/`
 - Primary output directory: `markdown_output/`
@@ -48,6 +49,7 @@ Current GUI details:
 - The run tab exposes `Brain 模式`: default fast mode disables model thinking for Brain JSON ops; high-quality mode can enable thinking for difficult pages.
 - The run tab exposes `Brain 上下文`: default radius `2` reads the current page plus two pages on each side; users can choose current-page-only or larger windows. CLI uses `--brain-context-radius`.
 - Official model/price refresh is available through CLI and GUI background refresh, with provider-aware diff summary and local fallback. DashScope refresh keeps the broad official catalog but filters obvious documentation slug artifacts; GUI role binding then narrows Vision/Brain candidates by capability metadata.
+- Windows one-dir packaging is prepared through `python scripts\build_windows_exe.py`. The script builds `dist/DocPage2MD/DocPage2MD.exe` on a fresh build, falls back to a timestamped `dist/DocPage2MD_.../DocPage2MD.exe` when the default output already exists, keeps PyInstaller work/spec caches in `%TEMP%\docpage2md_pyinstaller`, smokes the frozen CLI marker, excludes dev/Notebook packages, and refuses release artifacts containing local secrets, private input/output folders or tests.
 
 The longer-term WebUI plan is tracked in `docs/plans/webui-roadmap.md`. PaddleOCR status and follow-up comparison work are tracked in `docs/plans/paddleocr-integration-roadmap.md`.
 
@@ -166,7 +168,10 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
-- `python -m pytest -q`: 307 passed.
+- `python docpage2md.py --version`: passed.
+- `python -m pytest -q`: 367 passed.
+- `python scripts\build_windows_exe.py --dry-run`: passed.
+- `python scripts\build_windows_exe.py --distpath %TEMP%\docpage2md_dist_...`: passed; frozen `--docpage2md-cli --version` smoke passed, one-dir size about 68.5 MB after excluding dev/Notebook packages.
 - `git diff --check`: passed, with only CRLF conversion warnings.
 - GUI construction smoke passed: `DocPage2MdGui()` can construct, update idle tasks and destroy cleanly after the input table/provider/cost redesign.
 - `python -m pytest tests/test_cli.py tests/test_gui.py tests/test_hybrid_enrichment.py tests/test_mineru_pipeline.py tests/test_files_and_session.py tests/test_run_logger.py -q`: 41 passed during GUI/log/performance work.

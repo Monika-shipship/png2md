@@ -38,6 +38,11 @@
 - 新增统一应用版本号：
   - `docpage2md_app.__version__` 导出 `0.1.0`。
   - CLI 增加 `--version`，同时显示应用版本和 pipeline 兼容版本。
+- 新增 Windows exe 打包准备：
+  - `scripts/build_windows_exe.py` 使用 PyInstaller one-dir 打包 `docpage2md_gui.py`。
+  - 打包后的 GUI 通过内部 `--docpage2md-cli` 标记复用 CLI，避免冻结环境里找不到 `docpage2md.py`。
+  - 默认将 PyInstaller work/spec 缓存放到系统临时目录；若默认 `dist/DocPage2MD` 已存在，则自动改用带时间戳的 dist 子目录，避免 Windows 文件锁导致重复构建失败。
+  - 产物扫描会拒绝 `.env*`、`markdown_output/`、`input_docs/`、`tests/` 等私人文件；脚本也显式排除常见开发/Notebook 包，减小 one-dir 体积。
 - 优化 Tkinter GUI 页码输入流畅性：
   - 页码输入、命令预览、运行摘要和输入表格刷新改为 debounce。
   - PDF 页数按路径、大小和修改时间缓存；首次读取在后台线程完成，避免输入页码时卡住主线程。

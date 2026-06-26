@@ -26,6 +26,9 @@ log/
 latex_output/
 test_tmp/
 tmp/
+build/
+dist/
+release/
 session_*.json
 .cache/
 FULL_PRESENTATION.md

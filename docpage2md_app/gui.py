@@ -756,6 +756,8 @@ def missing_model_key_messages(vision: SelectedModel | None, brain: SelectedMode
 
 def build_process_command(options: GuiRunOptions, repo_root: Path | None = None) -> list[str]:
     root = repo_root or Path(__file__).resolve().parent.parent
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--docpage2md-cli", *build_cli_argv(options)]
     return [sys.executable, str(root / "docpage2md.py"), *build_cli_argv(options)]
 
 

@@ -12,12 +12,14 @@ Current entrypoints:
 - GUI: `python docpage2md_gui.py`
 - GUI package entry: `python -m docpage2md_app.gui`
 - Package help: `python -m docpage2md_app --help`
+- Windows one-dir packaging: `python scripts\build_windows_exe.py`
 
 ## Do Not Touch
 
 - Do not read, rewrite, move or delete `markdown_output/已归档`. It is deprecated output kept by user request.
 - Do not delete private PDFs under `tests/` or local output folders.
 - Do not save API Key values into files. Save only environment variable names.
+- Do not include `.env*`, `markdown_output/`, `latex_output/`, `input_docs/`, private PDFs or `tests/test-PaddleOCR/` in release artifacts.
 
 Expected secrets:
 
@@ -44,6 +46,13 @@ GUI supports the main MinerU and PaddleOCR paths: local single file, local multi
 Keep the run tab usable in non-fullscreen windows. The page-level canvas provides vertical scrolling, the cost table has horizontal scrolling, and command preview has copy/full-command affordances.
 
 Input UI should not expose a raw semicolon path string to normal users. Keep it as internal CLI compatibility only.
+
+Packaging notes:
+
+- `docpage2md_gui.py` accepts an internal `--docpage2md-cli` marker so the frozen GUI executable can launch CLI work without relying on a sibling `docpage2md.py` script.
+- `build_process_command()` uses `[sys.executable, "--docpage2md-cli", ...]` only when `sys.frozen` is set; source-tree runs still call `python docpage2md.py`.
+- `scripts/build_windows_exe.py` defaults PyInstaller work/spec paths to `%TEMP%\docpage2md_pyinstaller`; fresh final output is `dist/DocPage2MD/DocPage2MD.exe`, but if that directory already exists it uses a timestamped `dist/DocPage2MD_.../DocPage2MD.exe` unless `--replace-existing` is passed.
+- Run the packaging script's scan before publishing any release artifact; it intentionally rejects local secrets, input/output directories and tests.
 
 PaddleOCR implementation notes:
 

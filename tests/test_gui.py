@@ -432,6 +432,18 @@ def test_gui_build_process_command_uses_repo_script(tmp_path):
     assert command[-2:] == ["--mineru-url", "https://example.com/notes.pdf"]
 
 
+def test_gui_build_process_command_uses_frozen_cli_marker(monkeypatch, tmp_path):
+    exe = str(tmp_path / "DocPage2MD.exe")
+    monkeypatch.setattr("docpage2md_app.gui.sys.executable", exe)
+    monkeypatch.setattr("docpage2md_app.gui.sys.frozen", True, raising=False)
+    options = GuiRunOptions(source_value="https://example.com/notes.pdf", source_kind="mineru_url")
+
+    command = build_process_command(options, tmp_path)
+
+    assert command[:2] == [exe, "--docpage2md-cli"]
+    assert command[-2:] == ["--mineru-url", "https://example.com/notes.pdf"]
+
+
 def test_split_multi_paths_trims_quotes():
     assert split_multi_paths('"a.pdf"; b.docx; ') == ["a.pdf", "b.docx"]
 
