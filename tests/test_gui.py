@@ -10,6 +10,7 @@ from docpage2md_app.gui import (
     effective_mineru_model_version,
     GuiProgressTracker,
     GuiRunOptions,
+    InputFileInfo,
     SelectedModel,
     build_cli_argv,
     build_process_command,
@@ -709,5 +710,56 @@ def test_gui_page_range_typing_defers_input_table_refresh(monkeypatch):
         app.root.update_idletasks()
         assert calls["count"] == 0
         assert "input_table" in app._debounce_after_ids
+    finally:
+        app.destroy()
+
+
+def test_gui_input_table_refresh_updates_existing_rows_without_rebuild(monkeypatch, tmp_path):
+    try:
+        app = DocPage2MdGui()
+    except Exception as exc:
+        if exc.__class__.__name__ == "TclError":
+            pytest.skip(f"Tkinter display unavailable: {exc}")
+        raise
+
+    pdf = tmp_path / "notes.pdf"
+    pdf.write_bytes(b"%PDF")
+    state = {"pages": 1}
+
+    def fake_describe(_paths, _page_ranges, _generation):
+        return [
+            InputFileInfo(
+                path=pdf,
+                name=pdf.name,
+                suffix=".pdf",
+                size_text="1 KB",
+                pages=state["pages"],
+                limit_status="正常",
+                order=1,
+            )
+        ]
+
+    try:
+        app.root.withdraw()
+        app.input_files = [pdf]
+        monkeypatch.setattr(app, "_describe_input_files_cached", fake_describe)
+        app._refresh_input_table()
+        item_ids = app.input_tree.get_children()
+        assert item_ids == ("0",)
+
+        delete_calls = []
+        original_delete = app.input_tree.delete
+
+        def tracking_delete(*items):
+            delete_calls.extend(items)
+            return original_delete(*items)
+
+        monkeypatch.setattr(app.input_tree, "delete", tracking_delete)
+        state["pages"] = 2
+        app._refresh_input_table()
+
+        assert delete_calls == []
+        assert app.input_tree.get_children() == item_ids
+        assert app.input_tree.item("0", "values")[4] == "2"
     finally:
         app.destroy()

@@ -3198,23 +3198,26 @@ class DocPage2MdGui:
             return
         self._input_refresh_generation += 1
         generation = self._input_refresh_generation
-        for item_id in self.input_tree.get_children():
-            self.input_tree.delete(item_id)
         infos = self._describe_input_files_cached(self.input_files, self.page_ranges.get(), generation)
+        existing_ids = set(self.input_tree.get_children())
+        wanted_ids: set[str] = set()
         for info in infos:
-            self.input_tree.insert(
-                "",
-                "end",
-                iid=str(info.order - 1),
-                values=(
-                    info.order,
-                    info.name,
-                    info.suffix or "-",
-                    info.size_text,
-                    "未知" if info.pages is None else str(info.pages),
-                    info.limit_status,
-                ),
+            item_id = str(info.order - 1)
+            wanted_ids.add(item_id)
+            values = (
+                info.order,
+                info.name,
+                info.suffix or "-",
+                info.size_text,
+                "未知" if info.pages is None else str(info.pages),
+                info.limit_status,
             )
+            if item_id in existing_ids:
+                self.input_tree.item(item_id, values=values)
+            else:
+                self.input_tree.insert("", "end", iid=item_id, values=values)
+        for stale_id in existing_ids - wanted_ids:
+            self.input_tree.delete(stale_id)
         self.input_summary_text.set(_input_summary(infos, source_kind_key(self.source_kind.get()), self.source_value.get()))
         self._auto_adjust_mineru_model_for_inputs()
 

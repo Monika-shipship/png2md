@@ -169,7 +169,7 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
 - `python docpage2md.py --version`: passed.
-- `python -m pytest -q`: 367 passed.
+- `python -m pytest -q`: 368 passed.
 - `python scripts\build_windows_exe.py --dry-run`: passed.
 - `python scripts\build_windows_exe.py --distpath %TEMP%\docpage2md_dist_...`: passed; frozen `--docpage2md-cli --version` smoke passed, one-dir size about 68.5 MB after excluding dev/Notebook packages.
 - `git diff --check`: passed, with only CRLF conversion warnings.
