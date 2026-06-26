@@ -28,7 +28,7 @@ test_tmp/
 tmp/
 build/
 dist/
-release/
+/release/
 session_*.json
 .cache/
 FULL_PRESENTATION.md

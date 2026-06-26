@@ -81,3 +81,17 @@ def test_build_windows_exe_scan_rejects_private_outputs(tmp_path):
     assert app / ".env" in violations
     assert app / "markdown_output" in violations
     assert app / "docpage2md_app" / "ok.py" not in violations
+
+
+def test_build_windows_exe_copies_release_readme(tmp_path):
+    module = _load_build_module()
+    repo_root = tmp_path
+    app = tmp_path / "dist" / "DocPage2MD"
+    readme = repo_root / "docs" / "release" / "使用说明.md"
+    readme.parent.mkdir(parents=True)
+    app.mkdir(parents=True)
+    readme.write_text("使用说明", encoding="utf-8")
+
+    module.copy_release_docs(repo_root, app)
+
+    assert (app / "使用说明.md").read_text(encoding="utf-8") == "使用说明"

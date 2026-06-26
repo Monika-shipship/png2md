@@ -169,9 +169,10 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
 - `python docpage2md.py --help`: passed.
 - `python -m docpage2md_app --help`: passed.
 - `python docpage2md.py --version`: passed.
-- `python -m pytest -q`: 371 passed.
+- `python -m pytest -q`: 372 passed.
 - `python scripts\build_windows_exe.py --dry-run`: passed.
 - `python scripts\build_windows_exe.py --distpath %TEMP%\docpage2md_dist_...`: passed; frozen `--docpage2md-cli --version` smoke passed, one-dir size about 68.5 MB after excluding dev/Notebook packages.
+- Windows release package now includes `使用说明.md` next to `DocPage2MD.exe`; users should unzip the whole `DocPage2MD` folder instead of copying the exe alone.
 - `git diff --check`: passed, with only CRLF conversion warnings.
 - GUI construction smoke passed: `DocPage2MdGui()` can construct, update idle tasks and destroy cleanly after the input table/provider/cost redesign.
 - Live `dual_hybrid` upload validation for `tests/热统笔记.pdf` now requires explicit user approval because it uploads private pages to MinerU/PaddleOCR/model APIs. After approval on 2026-06-26, real validation ran successfully:

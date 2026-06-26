@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Expected executable not found: {exe_path}", file=sys.stderr)
         return 1
 
+    copy_release_docs(repo_root, app_dir)
+
     violations = scan_for_forbidden_files(app_dir)
     if violations:
         print("Refusing release artifact; forbidden local/private files were bundled:", file=sys.stderr)
@@ -141,6 +144,12 @@ def build_command(args: argparse.Namespace, repo_root: Path, distpath: Path | No
     command.append("--console" if args.console else "--windowed")
     command.append(str(entry))
     return command
+
+
+def copy_release_docs(repo_root: Path, app_dir: Path) -> None:
+    release_readme = repo_root / "docs" / "release" / "使用说明.md"
+    if release_readme.exists():
+        shutil.copy2(release_readme, app_dir / "使用说明.md")
 
 
 def _select_distpath(args: argparse.Namespace, repo_root: Path) -> Path:
