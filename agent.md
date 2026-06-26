@@ -1,6 +1,6 @@
 # DocPage2MD Agent Notes
 
-Last updated: 2026-06-25
+Last updated: 2026-06-26
 
 ## Current Goal
 
@@ -54,7 +54,7 @@ PaddleOCR implementation notes:
 - Default model: `PaddleOCR-VL-1.6`.
 - Default async endpoint: `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`.
 - Local PDF/page processing defaults to 100-page chunks.
-- Artifacts are saved under `.paddleocr_cache/.../artifact` and copied to final `paddleocr_raw/`.
+- Generated artifacts are saved under `.paddleocr_cache/.../artifact` during processing. Default `output_retention=slim` cleans generated parser cache after successful processing and does not copy final `paddleocr_raw/`; `debug` preserves raw artifacts/cache.
 - Do not commit PaddleOCR token values. Local ignored token note may be `.env.paddleocr.local.md`.
 - Adapter `block.confidence` must stay numeric (`0.0-1.0`). Store human labels such as `high` / `medium` / `low` in `confidence_label`, otherwise hybrid refiner float conversion can fail.
 
@@ -65,11 +65,23 @@ Dual engine implementation notes:
 - Remote URL dual mode is not supported yet; generate both artifacts first, then run artifact fusion.
 - Dual mode currently blocks PDFs that exceed the PaddleOCR chunk size because chunked dual merge is not implemented.
 - Fusion code lives in `docpage2md_app/fusion.py`, `docpage2md_app/fusion_prompt.py`, `docpage2md_app/dual_ir.py` and `docpage2md_app/dual_pipeline.py`.
-- The fusion layer writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json`.
+- The fusion layer writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json` only in `standard` / `debug` retention. Default `slim` keeps final Markdown, assets, metadata, logs and report.
 - Fusion uses candidate groups and whitelist actions only: `choose_block`, `merge_blocks`, `keep_both`, `mark_uncertain`, `attach_image`, `replace_formula`, `convert_text_to_formula`, `convert_text_to_figure_note`.
 - `dual_ir` is a compatibility wrapper; new behavior should go through `fusion.py`.
 - Keep existing hybrid parallelism intact after fusion. Do not let Brain freely rewrite full Markdown.
-- Dual local file mode now runs the MinerU and PaddleOCR parser submissions/waits concurrently for the same source file. Keep this parallel parser prep; it cuts front-loaded dual parser wait from roughly `MinerU + PaddleOCR` to roughly `max(MinerU, PaddleOCR)` before fusion.
+- Dual local multi-file mode now uses parser scheduling: `parser_workers` controls how many files are submitted/waited concurrently, and each file still runs MinerU and PaddleOCR concurrently. `doc_workers` controls how many ready documents enter fusion/enrichment at once. Keep this scheduler; do not regress to file-by-file serial parser submission.
+- `paddleocr` is a legal IR block origin. Do not remove it from `BLOCK_ALLOWED_ORIGINS` / `BLOCK_VISION_ORIGINS`; otherwise Brain checked ops in dual mode will be rejected by page IR contract validation.
+- PaddleOCR blocks must carry `source_engine`, numeric `confidence`, `bbox` (or `None`) and `evidence.raw_text`.
+
+Brain evidence-review contract:
+
+- Brain is an evidence reviewer, not a free Markdown rewriter.
+- It may read the current page plus a configurable compressed neighbor-page window and may discover new issues beyond initial findings.
+- Default Brain context radius is `2`; CLI/GUI expose `--brain-context-radius` / `Brain 上下文`, where `0` means current page only.
+- Initial rule/diff/validator/vision questions are first-class `findings`, not `suspects`, in new reports. Current initial sources include `deterministic_detector`, `validator_precheck`, `dual_engine_diff` and `vision_crop_evidence`.
+- Brain must return `decisions`, `new_findings` and `op_candidates`; accepted ops must be checked block ops with `finding_id` or `new_finding_id`, `decision`, `evidence_type`, `confidence` and a concrete target block/span.
+- `replace_text_span_checked` requires high confidence and short span evidence. Whole-page Markdown rewrites, code fences and `[mineru]` / `[paddleocr]` alternatives must be rejected locally.
+- Keep initial findings as priority signals, not the only allowed review range.
 
 ## Parallelism
 
@@ -80,6 +92,7 @@ Hybrid parallelism is required behavior:
 - Brain runs all pages in one thread pool after crop Vision completes, default `brain_batch_workers = 60`.
 - Actual worker count is `min(job_count, configured_workers)`.
 - Brain defaults to fast non-thinking mode (`brain_thinking=disabled`) for JSON ops / Markdown structure refinement. Users can enable high-quality thinking for difficult pages through the GUI or `--brain-thinking enabled`.
+- Brain context radius is configurable independently from worker count; larger windows can improve cross-page corrections but increase Brain prompt tokens, cost and latency.
 
 Do not serialize page Brain calls unless explicitly debugging a provider limit. If provider throttling becomes a problem, expose throttling as a user setting instead of removing parallelism.
 
@@ -90,6 +103,8 @@ Current GUI exposes concurrency presets:
 - `高并发 12/12`
 - `极速 60/60`
 - `自定义`
+
+GUI also exposes parser/document workers separately from Vision/Brain workers. Presets intentionally affect only Vision/Brain so parser scheduling is not changed implicitly during A/B runs.
 
 The processor logs Brain per-page elapsed time plus p50/p90/max and a long-tail warning. If a real run is slow with no 429/retry, first compare the same PDF with Brain workers `60`, `12`, `6` and `3` before changing the core pipeline.
 New Brain logs include actual worker count, configured worker limit and fast/high-quality thinking mode, so `actual=11, limit=60` on an 11-page PDF is expected and does not mean parallelism was removed.
@@ -161,6 +176,21 @@ Latest dual engine real verification:
   - Crop Vision `47` blocks about `20.9s`.
   - Brain `11` pages in fast mode: total about `12.2s`, p50 `8.4s`, p90 `11.9s`, max `12.1s`, tail ratio `1.45`.
   - Compared with the earlier thinking-enabled run (`91.6s` Brain total), the main bottleneck was DeepSeek Brain thinking latency, not missing thread parallelism.
+- Contract/evidence-review artifact rerun after allowing `paddleocr` origin and adding local Brain op policy:
+  - Output: `markdown_output/real_contract_fix_smoke/real_contract_fix_4_1_v3`.
+  - Same existing MinerU/PaddleOCR artifacts, `dual_hybrid`, balanced profile, Vision workers `60`, Brain workers `60`, Brain thinking disabled.
+  - Status `ok`, pages `11/11`, `contract_error_codes={}`, no bad page IR contract errors.
+  - Final Markdown scan found no API key, traceback, reasoning text, validator text, provider error, `[mineru]` / `[paddleocr]` labels, `<details open>` or raw figure JSON keys.
+  - Figure block on page 3 is preserved as a default-closed Chinese `<details>` section.
+  - This run was slow because crop Vision had provider long-tail latency: 48 crops completed in about `65.9s`; Brain 11 pages completed in about `20.7s`.
+- Findings/context-window artifact rerun after adding explicit dual-engine and Vision finding sources:
+  - Output: `markdown_output/findings_brain_window_verify/dual_4_1_findings_window_v3`.
+  - Same existing MinerU/PaddleOCR artifacts, `dual_hybrid`, balanced profile, Vision workers `60`, Brain workers `60`, `--brain-context-radius 2`, Brain thinking disabled.
+  - Status `ok`, pages `11/11`, `summary.suspects` absent and no `pages[].suspects`.
+  - `summary.findings.by_source`: `validator_precheck=36`, `dual_engine_diff=138`, `vision_crop_evidence=48`, `deterministic_detector=2`.
+  - Brain context windows recorded radius `2` with actual context page counts `3/4/5`.
+  - Final Markdown scan found no `[mineru]` / `[paddleocr]`, Traceback, reasoning text, validator text or `<details open>`.
+  - Runtime about `96.8s`: crop Vision 48 blocks about `34.2s`; Brain 11 pages about `61.2s`. The latest bottleneck was Vision/Brain provider long-tail latency, not missing thread parallelism.
 
 ## Logging
 
@@ -257,7 +287,7 @@ HTML/HTM must use `MinerU-HTML`; non-HTML must use `vlm` or `pipeline`.
 - Use `docpage2md_app.cost.estimate_deepseek_text_tokens()` / `estimate_deepseek_chat_tokens()` for offline DeepSeek token estimates; do not require `transformers` for GUI cost estimation.
 - Qwen image token estimates use the Aliyun smart-resize rule for Qwen3-VL/Qwen3.5/3.6/3.7: `32x32` pixels per visual token, plus the two vision boundary tokens, with `min_pixels/max_pixels`.
 - Local PDF/Office cost before MinerU is still approximate because true crop blocks and Brain prompt text do not exist yet. Existing MinerU artifact cost can use real crop image dimensions and real Brain prompts.
-- GUI cost UI is a per-file table: pages, estimated crop blocks, input/output tokens, fee, confidence and note.
+- GUI cost UI is a per-file table split by Vision input/output/cost and Brain input/output/cost, plus a Brain context-window comparison table for radii `0/1/2/3/5`.
 - MinerU and PaddleOCR are displayed as platform quota/limit items, not as RMB model cost.
 - Official model/price refresh is explicit: `--refresh-models`, `--refresh-prices`, `--providers`, `--show-model-diff`, `--import-pricing-md`.
 - DashScope uses official docs/parsers; DeepSeek uses `/models` plus official pricing parser with local fallback; OpenAI-compatible only discovers `/models` and never guesses prices.

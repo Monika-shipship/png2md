@@ -8,6 +8,7 @@ from typing import Any
 from .artifacts import RUN_REPORT_SCHEMA_VERSION, now_iso, sha256_text
 from .config import AppConfig
 from .content_inventory import build_content_inventory
+from .confusion import contextual_ocr_corrections_disabled_report
 from .dual_ir import DUAL_ADAPTER_VERSION
 from .files import merge_markdowns, write_json, write_text_atomic
 from .fusion import fuse_document_irs
@@ -17,6 +18,7 @@ from .mineru_artifacts import discover_mineru_artifacts
 from .mineru_pipeline import _copy_assets as _copy_mineru_assets
 from .mineru_pipeline import _copy_mineru_raw, _empty_hybrid_stage, _page_assets
 from .mineru_adapter import rewrite_asset_refs as rewrite_mineru_asset_refs
+from .output_retention import retention_report, should_copy_raw_artifacts, should_write_ir
 from .paddleocr_adapter import adapt_paddleocr_artifacts
 from .paddleocr_artifacts import discover_paddleocr_artifacts
 from .paddleocr_pipeline import _copy_assets as _copy_paddleocr_assets
@@ -56,14 +58,20 @@ def process_dual_artifact_task(
     mineru_ir = adapt_mineru_artifacts(mineru_artifacts, source_path=source_path, engine_mode=DUAL_ENGINE_MODE)
     mineru_ref_map = _copy_mineru_assets(mineru_ir, output_root)
     rewrite_mineru_asset_refs(mineru_ir, mineru_ref_map)
-    _copy_mineru_raw(mineru_artifacts, output_root)
+    if should_copy_raw_artifacts(config):
+        _copy_mineru_raw(mineru_artifacts, output_root)
+    else:
+        safe_progress(progress, f"Skipped MinerU raw artifact copy: retention={config.output_retention}")
     safe_progress(progress, f"MinerU evidence ready: pages={len(mineru_ir.get('pages') or [])}, assets={len(mineru_ref_map)}")
 
     safe_progress(progress, "Adapting PaddleOCR artifact to DocumentIR")
     paddleocr_ir = adapt_paddleocr_artifacts(paddleocr_artifacts, source_path=source_path, engine_mode=DUAL_ENGINE_MODE)
     paddle_ref_map = _copy_paddleocr_assets(paddleocr_ir, output_root)
     rewrite_paddleocr_asset_refs(paddleocr_ir, paddle_ref_map)
-    _copy_paddleocr_raw(paddleocr_artifacts, output_root)
+    if should_copy_raw_artifacts(config):
+        _copy_paddleocr_raw(paddleocr_artifacts, output_root)
+    else:
+        safe_progress(progress, f"Skipped PaddleOCR raw artifact copy: retention={config.output_retention}")
     safe_progress(progress, f"PaddleOCR evidence ready: pages={len(paddleocr_ir.get('pages') or [])}, assets={len(paddle_ref_map)}")
 
     safe_progress(progress, "Fusing MinerU + PaddleOCR candidate groups")
@@ -96,17 +104,23 @@ def process_dual_artifact_task(
         progress=progress,
     )
     document_ir = enrichment["document_ir"]
+    contextual_corrections = contextual_ocr_corrections_disabled_report(document_ir)
     safe_progress(progress, f"Dual hybrid enrichment done: {enrichment.get('summary')}")
 
     ir_dir = output_root / "ir"
-    ir_dir.mkdir(parents=True, exist_ok=True)
-    write_json(ir_dir / "mineru_document_ir.json", mineru_ir)
-    write_json(ir_dir / "paddleocr_document_ir.json", paddleocr_ir)
-    write_json(ir_dir / "fused_document_ir.json", document_ir)
-    write_json(ir_dir / "document_ir.json", document_ir)
-    safe_progress(progress, f"Wrote dual fusion IR files: {ir_dir}")
+    write_ir = should_write_ir(config)
+    if write_ir:
+        ir_dir.mkdir(parents=True, exist_ok=True)
+        write_json(ir_dir / "mineru_document_ir.json", mineru_ir)
+        write_json(ir_dir / "paddleocr_document_ir.json", paddleocr_ir)
+        write_json(ir_dir / "fused_document_ir.json", document_ir)
+        write_json(ir_dir / "document_ir.json", document_ir)
+        safe_progress(progress, f"Wrote dual fusion IR files: {ir_dir}")
+    else:
+        safe_progress(progress, f"Skipped dual fusion IR write: retention={config.output_retention}")
 
     report = _initial_report(output_name, config, document_ir, mineru_artifacts, paddleocr_artifacts, source_path)
+    report["contextual_ocr_corrections"] = contextual_corrections
     report["fusion"] = fusion_report
     report["dual_parser"]["strategy"] = fusion_report.get("strategy") or "candidate_group_checked_ops"
     report["hybrid_enrichment"] = {
@@ -136,13 +150,14 @@ def process_dual_artifact_task(
         meta_path = output_root / f"Slide_{slide_no:02d}.meta.json"
         write_text_atomic(slide_path, markdown)
         write_json(meta_path, _slide_meta(slide_no, markdown, validation.to_dict()))
-        write_json(ir_dir / f"page_{slide_no:03d}_ir.json", page_ir)
+        if write_ir:
+            write_json(ir_dir / f"page_{slide_no:03d}_ir.json", page_ir)
         ok_slides.append(slide_no)
 
         enrichment_page = (enrichment or {}).get("pages", {}).get(slide_no) if enrichment else None
         page_report = _page_report(page_ir, slide_no, slide_path, meta_path, markdown, validation.to_dict(), status, enrichment_page)
         report["pages"].append(page_report)
-        refresh_page_suspects(page_report, page_ir.get("blocks") or [])
+        refresh_page_suspects(page_report, page_ir.get("blocks") or [], page_ir)
         safe_progress(progress, f"Dual page rendered: slide={slide_no}, status={status}, markdown={slide_path.name}")
     safe_progress(progress, f"Dual Markdown rendering done: pages={len(ok_slides)}, elapsed={time.monotonic() - render_started:.1f}s")
 
@@ -258,6 +273,7 @@ def _initial_report(
             "enabled": True,
         },
         "pages": [],
+        "output_retention": retention_report(config),
     }
 
 
@@ -281,6 +297,8 @@ def _page_report(
         "op_audit": [],
         "validation": None,
     }
+    vision_report = (enrichment_page or {}).get("vision") or _empty_hybrid_stage("vision")
+    brain_report = (enrichment_page or {}).get("brain") or _empty_hybrid_stage("brain")
     return {
         "slide_no": slide_no,
         "image_path": page_ir.get("page_image_ref"),
@@ -314,11 +332,19 @@ def _page_report(
             "error_message": None if status == "ok" else "Dual render produced validation errors.",
             "warnings": [],
         },
-        "vision": (enrichment_page or {}).get("vision") or _empty_hybrid_stage("vision"),
-        "brain": (enrichment_page or {}).get("brain") or _empty_hybrid_stage("brain"),
+        "vision": vision_report,
+        "brain": brain_report,
         "validation": validation,
         "quality": summarize_blocks(blocks),
-        "suspects": [],
+        "findings": {
+            "initial": [],
+            "brain_decisions": ((brain_report or {}).get("findings") or {}).get("brain_decisions")
+            or (brain_report or {}).get("decisions")
+            or [],
+            "brain_discovered": ((brain_report or {}).get("findings") or {}).get("brain_discovered")
+            or (brain_report or {}).get("new_findings")
+            or [],
+        },
         "provenance": build_page_provenance(page_ir),
         "content_inventory": build_content_inventory(page_ir, markdown, op_audit=op_audit),
         "block_refiner": block_refiner,

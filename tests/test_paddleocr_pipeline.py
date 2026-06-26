@@ -38,7 +38,7 @@ def _artifact(root: Path, text: str = "群论笔记") -> Path:
 
 def test_paddleocr_pipeline_renders_artifact(tmp_path):
     artifact = _artifact(tmp_path / "artifact")
-    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="paddleocr_only")
+    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="paddleocr_only", output_retention="debug")
 
     result = process_paddleocr_artifact_task(artifact, config, doc_name="notes")
 
@@ -51,6 +51,32 @@ def test_paddleocr_pipeline_renders_artifact(tmp_path):
     report = json.loads((output / "run_report.json").read_text(encoding="utf-8"))
     assert report["engine_mode"] == "paddleocr_only"
     assert report["models"]["layout_engine"]["model"] == "PaddleOCR-VL-1.6"
+    assert report["pages"][0]["brain"]["status"] == "skipped"
+    assert report["pages"][0]["brain"]["ops_requested"] == 0
+    assert report["pages"][0]["brain"]["usage"] is None
+    assert isinstance(report["pages"][0]["validation"], dict)
+    assert isinstance(report["pages"][0]["findings"]["initial"], list)
+    assert "findings" in report["summary"]
+    assert "suspects" not in report["summary"]
+    assert "suspects" not in report["pages"][0]
+    assert report["output_retention"]["mode"] == "debug"
+
+
+def test_paddleocr_pipeline_slim_skips_raw_and_ir_but_keeps_markdown_assets(tmp_path):
+    artifact = _artifact(tmp_path / "artifact")
+    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="paddleocr_only")
+
+    result = process_paddleocr_artifact_task(artifact, config, doc_name="notes")
+
+    output = Path(result["output_dir"])
+    assert (output / "Slide_01.md").exists()
+    assert (output / "notes_FULL.md").exists()
+    assert (output / "run_report.json").exists()
+    assert not (output / "ir").exists()
+    assert not (output / "paddleocr_raw").exists()
+    assert (output / "assets" / "paddleocr").exists()
+    report = json.loads((output / "run_report.json").read_text(encoding="utf-8"))
+    assert report["output_retention"]["mode"] == "slim"
 
 
 def test_paddleocr_chunk_merge_renumbers_outputs(tmp_path):

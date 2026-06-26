@@ -1,6 +1,6 @@
 # DocPage2MD Current Status
 
-Last updated: 2026-06-25
+Last updated: 2026-06-26
 
 ## Project Identity
 
@@ -37,24 +37,34 @@ Current GUI details:
 - Advanced MinerU settings are collapsed by default and pass CLI args for OCR/formula/table/language.
 - MinerU defaults to `vlm`; HTML/HTM automatically uses `MinerU-HTML`; non-HTML cannot use `MinerU-HTML`.
 - Local PDF inputs can enable automatic MinerU page splitting, with final chunk merge/audit.
-- Cost UI is a table and only estimates Vision/Brain token fees; MinerU/PaddleOCR are quota/limit notes.
+- Cost UI is a table and only estimates Vision/Brain token fees; MinerU/PaddleOCR are quota/limit notes. The table splits Vision and Brain input/output/cost, and includes a Brain context-window comparison for radii `0/1/2/3/5`.
 - The run tab remains usable in non-fullscreen windows: the page scrolls vertically, the cost table scrolls horizontally, and command preview supports horizontal scrolling plus copy/full-command actions.
 - Model management is provider-first: Provider/Key, role binding, candidate models and third-party model library.
 - PaddleOCR is selectable as a parser engine, default model `PaddleOCR-VL-1.6`, async endpoint `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`, default PDF chunk size 100 pages.
-- Dual parser is selectable as `MinerU + PaddleOCR 双引擎融合`; it currently supports local files/folders and artifact pairs, not remote URLs or automatic chunked dual merge. It writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json`.
-- For one local `dual_hybrid` source file, MinerU and PaddleOCR parser submission/wait/download now run concurrently before fusion. Multi-file dual batches still process files sequentially to avoid uncontrolled parser and Vision/Brain pressure.
-- The run tab exposes concurrency presets: `保守 3/3`, `均衡 6/6`, `高并发 12/12`, `极速 60/60` and `自定义`. The raw Vision/Brain worker fields remain visible for exact control.
+- Dual parser is selectable as `MinerU + PaddleOCR 双引擎融合`; it currently supports local files/folders and artifact pairs, not remote URLs or automatic chunked dual merge. It writes `ir/mineru_document_ir.json`, `ir/paddleocr_document_ir.json`, `ir/fused_document_ir.json` and compatibility `ir/document_ir.json` only in `standard` / `debug` retention.
+- Default output retention is `slim`: keep Markdown, referenced assets, `.meta.json`, `process.log` and `run_report.json`; skip raw artifact copies, skip IR, and clean generated parser cache after success. `standard` keeps IR; `debug` keeps raw artifacts/cache.
+- Dual local multi-file mode now schedules parser work across files: `parser_workers` controls concurrent file submissions/waits, each file still submits MinerU and PaddleOCR concurrently, and `doc_workers` controls how many ready documents enter fusion/enrichment at once.
+- The run tab exposes concurrency presets: `保守 3/3`, `均衡 6/6`, `高并发 12/12`, `极速 60/60` and `自定义`. The raw Parser/Document/Vision/Brain worker fields remain visible for exact control; presets only change Vision/Brain.
 - The run tab exposes `Brain 模式`: default fast mode disables model thinking for Brain JSON ops; high-quality mode can enable thinking for difficult pages.
+- The run tab exposes `Brain 上下文`: default radius `2` reads the current page plus two pages on each side; users can choose current-page-only or larger windows. CLI uses `--brain-context-radius`.
 - Official model/price refresh is available through CLI and GUI background refresh, with provider-aware diff summary and local fallback. DashScope refresh keeps the broad official catalog but filters obvious documentation slug artifacts; GUI role binding then narrows Vision/Brain candidates by capability metadata.
 
 The longer-term WebUI plan is tracked in `docs/plans/webui-roadmap.md`. PaddleOCR status and follow-up comparison work are tracked in `docs/plans/paddleocr-integration-roadmap.md`.
 
 Hybrid parallelism is active:
 
+- Multi-file parser scheduling is active for dual local mode: default `parser_workers=8`, default `doc_workers=1`.
 - Crop Vision runs all eligible crop blocks in a thread pool, default `vision_batch_workers = 60`.
 - Brain refinement runs all pages in a thread pool after crop Vision completes, default `brain_batch_workers = 60`.
 - Actual workers are capped by job count, so an 11-page PDF uses 11 Brain workers even if the configured limit is 60.
-- Brain logs now include actual workers, configured worker limit, thinking mode, per-page elapsed time plus p50/p90/max and a long-tail warning. If high concurrency is slower, compare the same PDF with Brain workers `60`, `12`, `6` and `3`.
+- Brain logs now include actual workers, configured worker limit, context radius, thinking mode, per-page elapsed time plus p50/p90/max and a long-tail warning. If high concurrency is slower, compare the same PDF with Brain workers `60`, `12`, `6` and `3`.
+
+Brain review / audit status:
+
+- New reports use first-class `findings` instead of `suspects`.
+- Initial findings come from deterministic checks, validator precheck, quality checks, dual-engine evidence and Vision evidence.
+- Brain outputs must use `decisions`, `new_findings` and `op_candidates`.
+- Final mutations still go only through checked ops and Validator; Brain cannot write final Markdown directly.
 
 User-facing Markdown remains:
 
@@ -190,6 +200,21 @@ python docpage2md.py --engine-mode hybrid --model-profile cheap --input-file ".\
   - With default fast mode (`brain_thinking=disabled`), Brain total was about `12.2s`, p50 `8.4s`, p90 `11.9s`, max `12.1s`.
   - This replaced the old thinking path that took about `91.6s`; the major single-PDF speed fix is disabling Brain thinking by default, not lowering concurrency.
   - Output report status `ok`, `engine_mode=dual_hybrid`, `models.brain.thinking.mode=disabled`; final Markdown scan found no key names, tracebacks, validator text or reasoning text.
+- Contract/evidence-review verification:
+  - Output: `markdown_output/real_contract_fix_smoke/real_contract_fix_4_1_v3`.
+  - Reused existing `群论笔记4.1` MinerU/PaddleOCR artifacts, `dual_hybrid`, balanced profile, Vision workers `60`, Brain workers `60`, Brain thinking disabled.
+  - `paddleocr` origin is accepted by PageIR contract; `run_report.json` has `contract_error_codes={}` and no bad page IR contract errors.
+  - Brain remains context-aware but local policy now rejects missing evidence fields, low-confidence replacements, missing target blocks/spans and whole Markdown rewrites.
+  - Final Markdown scan found no API key, traceback, reasoning text, validator text, provider error, `[mineru]` / `[paddleocr]` candidate labels, `<details open>` or raw figure JSON keys.
+  - Page 3 figure is preserved as a default-closed Chinese `<details>` block.
+  - Performance note: this run took longer because crop Vision had provider long-tail latency. 48 crop Vision blocks took about `65.9s`; Brain 11 pages took about `20.7s`.
+- Findings/context-window verification:
+  - Output: `markdown_output/findings_brain_window_verify/dual_4_1_findings_window_v3`.
+  - Reused existing `群论笔记4.1` MinerU/PaddleOCR artifacts, `dual_hybrid`, balanced profile, Vision workers `60`, Brain workers `60`, `--brain-context-radius 2`, Brain thinking disabled.
+  - `run_report.json` has `summary.findings.by_source = {validator_precheck:36, dual_engine_diff:138, vision_crop_evidence:48, deterministic_detector:2}`.
+  - `summary.suspects` and `pages[].suspects` are absent; Brain context windows record configured radius `2` and actual context pages `3/4/5`.
+  - Final Markdown scan found no `[mineru]` / `[paddleocr]`, Traceback, reasoning text, validator text or `<details open>`.
+  - Runtime about `96.8s`: crop Vision 48 blocks about `34.2s`; Brain 11 pages about `61.2s`. This confirms the latest bottleneck is provider long-tail latency, not missing thread parallelism.
 - Latest PaddleOCR GUI real verification:
   - Source: `tests/群论笔记4.1.pdf`.
   - GUI path was driven through `DocPage2MdGui._options()` / `_validate_before_run()` / `_start_process()` and its subprocess command preview.

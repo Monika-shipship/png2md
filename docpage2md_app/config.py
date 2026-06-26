@@ -21,10 +21,14 @@ DEFAULT_INPUT_FOLDER = "./doc_pages"
 DEFAULT_OUTPUT_FOLDER = "./markdown_output"
 DEFAULT_LOG_FOLDER = "./log"
 DEFAULT_MODEL_CACHE_PATH = ".cache/aliyun_model_catalog.json"
+DEFAULT_OUTPUT_RETENTION = "slim"
+OUTPUT_RETENTION_MODES = ("slim", "standard", "debug")
 
 DEFAULT_MAX_DOCPAGE_WORKERS = 1
+DEFAULT_PARSER_WORKERS = 8
 DEFAULT_VISION_BATCH_WORKERS = 60
 DEFAULT_BRAIN_BATCH_WORKERS = 60
+DEFAULT_BRAIN_CONTEXT_RADIUS = 2
 
 DEFAULT_THINKING_BUDGET_VISION = 2048
 DEFAULT_THINKING_BUDGET_BRAIN = 2048
@@ -94,14 +98,17 @@ class AppConfig:
     paddleocr_layout_detection: bool = True
     paddleocr_formula_recognition: bool = True
     paddleocr_table_recognition: bool = True
-    paddleocr_visualize: bool = True
+    paddleocr_visualize: bool = False
+    output_retention: str = DEFAULT_OUTPUT_RETENTION
     vision_input_price_per_million: Optional[float] = None
     vision_output_price_per_million: Optional[float] = None
     brain_input_price_per_million: Optional[float] = None
     brain_output_price_per_million: Optional[float] = None
     max_docpage_workers: int = DEFAULT_MAX_DOCPAGE_WORKERS
+    parser_workers: int = DEFAULT_PARSER_WORKERS
     vision_batch_workers: int = DEFAULT_VISION_BATCH_WORKERS
     brain_batch_workers: int = DEFAULT_BRAIN_BATCH_WORKERS
+    brain_context_radius: int = DEFAULT_BRAIN_CONTEXT_RADIUS
     thinking_budget_vision: int = DEFAULT_THINKING_BUDGET_VISION
     thinking_budget_brain: int = DEFAULT_THINKING_BUDGET_BRAIN
     brain_thinking: str = DEFAULT_BRAIN_THINKING

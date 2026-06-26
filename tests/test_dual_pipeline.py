@@ -60,7 +60,7 @@ def test_dual_ir_merges_paddleocr_as_secondary_evidence(tmp_path):
 
 def test_dual_pipeline_renders_and_records_both_raw_dirs(tmp_path):
     paddle = _paddle_artifact(tmp_path / "paddle")
-    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="dual_hybrid")
+    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="dual_hybrid", output_retention="debug")
 
     result = process_dual_artifact_task(
         MINERU_FIXTURE,
@@ -88,6 +88,31 @@ def test_dual_pipeline_renders_and_records_both_raw_dirs(tmp_path):
     document_ir = read_json(output / "ir" / "document_ir.json")
     assert document_ir["pages"][0]["dual_evidence"]["paddleocr"]["block_count"] == 2
     assert document_ir["pages"][0]["fusion"]["candidate_groups"]
+    assert report["output_retention"]["mode"] == "debug"
+
+
+def test_dual_pipeline_slim_skips_raw_and_ir_but_keeps_markdown_assets(tmp_path):
+    paddle = _paddle_artifact(tmp_path / "paddle")
+    config = AppConfig(output_folder=str(tmp_path / "out"), engine_mode="dual_hybrid")
+
+    result = process_dual_artifact_task(
+        MINERU_FIXTURE,
+        paddle,
+        config,
+        doc_name="dual_slim",
+        vision_backend=lambda page, block, image, config: {"success": True, "description": block.get("description") or block.get("text") or ""},
+        brain_backend=lambda page, context, config: {"success": True, "ops": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    )
+
+    output = Path(result["output_dir"])
+    assert (output / "Slide_01.md").exists()
+    assert (output / "dual_slim_FULL.md").exists()
+    assert (output / "run_report.json").exists()
+    assert not (output / "mineru_raw").exists()
+    assert not (output / "paddleocr_raw").exists()
+    assert not (output / "ir").exists()
+    report = read_json(output / "run_report.json")
+    assert report["output_retention"]["mode"] == "slim"
 
 
 def test_dual_page_limit_uses_paddleocr_chunk_size():

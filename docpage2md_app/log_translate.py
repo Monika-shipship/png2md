@@ -11,7 +11,8 @@ HYBRID_CROP_BATCH_DONE_RE = re.compile(
     r"Hybrid crop vision batch done: blocks=(\d+), succeeded=(\d+), failed=(\d+), elapsed=([\d.]+)s"
 )
 HYBRID_BRAIN_BATCH_RE = re.compile(
-    r"Hybrid Brain batch start: pages=(\d+), workers=(\d+)(?:, requested_workers=(\d+), thinking=([^,]+))?"
+    r"Hybrid Brain batch start: pages=(\d+), workers=(\d+)"
+    r"(?:, requested_workers=(\d+)(?:, tasks=(\d+), skipped=(\d+))?, thinking=([^,]+))?"
 )
 HYBRID_BRAIN_BATCH_DONE_RE = re.compile(r"Hybrid Brain batch done: pages=(\d+), statuses=([^,]+), elapsed=([\d.]+)s")
 HYBRID_BRAIN_LATENCY_SUMMARY_RE = re.compile(
@@ -163,6 +164,21 @@ def translate_progress_message(message: str) -> str:
         return f"双引擎运行报告已写入：{match.group(1)}，状态={_status_label(match.group(2))}"
     if match := re.search(r"Dual parser submit start: source=(.+)", message):
         return f"开始提交双引擎解析：文件={match.group(1)}"
+    if match := re.search(
+        r"Dual local scheduler start: files=(\d+), parser_workers=(\d+), doc_workers=(\d+), per_file_engines=(\d+), vision_workers=(\d+), brain_workers=(\d+)",
+        message,
+    ):
+        return (
+            f"启动双引擎本地调度：文件数={match.group(1)}，解析并发={match.group(2)}，"
+            f"文档并发={match.group(3)}，每文件解析引擎={match.group(4)}，"
+            f"Vision并发={match.group(5)}，Brain并发={match.group(6)}"
+        )
+    if match := re.search(r"Dual parser artifacts ready: source=([^,]+), mineru=([^,]+), paddleocr=(.+)", message):
+        return f"双引擎解析结果已就绪：文件={match.group(1)}，MinerU={match.group(2)}，PaddleOCR={match.group(3)}"
+    if match := re.search(r"Dual document processing start: source=(.+)", message):
+        return f"开始融合精修文档：文件={match.group(1)}"
+    if match := re.search(r"Dual document done: source=([^,]+), pages=(\d+), output=(.+)", message):
+        return f"双引擎文档完成：文件={match.group(1)}，页数={match.group(2)}，输出={match.group(3)}"
     if match := re.search(r"Dual MinerU submit: (.+)", message):
         return f"双引擎正在提交 MinerU：{match.group(1)}"
     if match := re.search(r"Dual MinerU batch submitted: batch_id=(.+)", message):
@@ -179,6 +195,21 @@ def translate_progress_message(message: str) -> str:
         return f"正在下载 PaddleOCR 证据 artifact：来源={match.group(1)}，缓存键={match.group(2)}"
     if match := re.search(r"PaddleOCR artifact ready for dual mode: (.+)", message):
         return f"PaddleOCR 证据 artifact 已就绪：{match.group(1)}"
+    if match := re.search(r"Skipped (MinerU|PaddleOCR) raw artifact copy: retention=(.+)", message):
+        return f"已跳过 {match.group(1)} 原始解析结果复制：保留模式={match.group(2)}"
+    if match := re.search(r"Skipped (?:dual fusion )?document IR write: retention=(.+)", message):
+        return f"已跳过内部 IR 写入：保留模式={match.group(1)}"
+    if match := re.search(r"Skipped dual fusion IR write: retention=(.+)", message):
+        return f"已跳过双引擎融合 IR 写入：保留模式={match.group(1)}"
+    if match := re.search(r"Parser cache cleaned by slim retention: (.+)", message):
+        return f"精简模式已清理解析缓存：{match.group(1)}"
+    if match := re.search(r"Parser cache cleanup skipped: ([^,]+), reason=(.+)", message):
+        return f"解析缓存清理跳过：{match.group(1)}，原因={match.group(2)}"
+    if match := re.search(r"Chunk output cleaned by slim retention: (.+)", message):
+        return f"精简模式已清理分段临时输出：{match.group(1)}"
+    if match := re.search(r"Chunk output cleanup skipped: ([^,]+)(?:, reason=(.+))?", message):
+        reason = f"，原因={match.group(2)}" if match.group(2) else ""
+        return f"分段临时输出清理跳过：{match.group(1)}{reason}"
     if match := re.search(r"Dual hybrid local batch complete: (\d+)/(\d+) files", message):
         return f"双引擎本地批量完成：{match.group(1)}/{match.group(2)} 个文件"
     if message.startswith("Dual hybrid failed:"):
@@ -314,10 +345,13 @@ def translate_progress_message(message: str) -> str:
         )
     if match := HYBRID_BRAIN_BATCH_RE.search(message):
         if match.group(3):
-            thinking = "关闭思考/快速模式" if match.group(4) == "disabled" else "开启思考/高质量模式"
+            thinking = "关闭思考/快速模式" if match.group(6) == "disabled" else "开启思考/高质量模式"
+            task_text = ""
+            if match.group(4) is not None:
+                task_text = f"，页任务={match.group(4)}，跳过={match.group(5)}"
             return (
                 f"开始并行 Brain 精修：页数={match.group(1)}，实际并发={match.group(2)}，"
-                f"配置上限={match.group(3)}，模式={thinking}"
+                f"配置上限={match.group(3)}{task_text}，模式={thinking}"
             )
         return f"开始并行 Brain 精修：页数={match.group(1)}，并发={match.group(2)}"
     if match := HYBRID_BRAIN_BATCH_DONE_RE.search(message):

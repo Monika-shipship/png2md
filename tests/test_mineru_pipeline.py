@@ -9,7 +9,7 @@ FIXTURE = Path("tests/fixtures/mineru_public/minimal_artifact")
 
 
 def test_mineru_artifact_pipeline_writes_markdown_assets_ir_and_report(tmp_path):
-    config = AppConfig(output_folder=str(tmp_path), engine_mode="mineru_only")
+    config = AppConfig(output_folder=str(tmp_path), engine_mode="mineru_only", output_retention="debug")
 
     result = process_mineru_artifact_task(FIXTURE, config, doc_name="MinerUFixture", engine_mode="mineru_only")
 
@@ -41,6 +41,31 @@ def test_mineru_artifact_pipeline_writes_markdown_assets_ir_and_report(tmp_path)
     assert report["summary"]["content_inventory"]["source_block_count"] > 0
     assert report["summary"]["content_inventory"]["unaccounted_count"] == 0
     assert report["pages"][0]["content_inventory"]["summary"]["missing_visual_evidence_count"] == 0
+    assert report["pages"][0]["brain"]["status"] == "skipped"
+    assert report["pages"][0]["brain"]["ops_requested"] == 0
+    assert report["pages"][0]["brain"]["usage"] is None
+    assert isinstance(report["pages"][0]["validation"], dict)
+    assert isinstance(report["pages"][0]["findings"]["initial"], list)
+    assert "findings" in report["summary"]
+    assert "suspects" not in report["summary"]
+    assert "suspects" not in report["pages"][0]
+    assert report["output_retention"]["mode"] == "debug"
+
+
+def test_mineru_artifact_pipeline_slim_skips_raw_and_ir_but_keeps_markdown_assets(tmp_path):
+    config = AppConfig(output_folder=str(tmp_path), engine_mode="mineru_only")
+
+    result = process_mineru_artifact_task(FIXTURE, config, doc_name="MinerUSlim", engine_mode="mineru_only")
+
+    output_dir = Path(result["output_dir"])
+    assert (output_dir / "Slide_01.md").exists()
+    assert (output_dir / "MinerUSlim_FULL.md").exists()
+    assert (output_dir / "run_report.json").exists()
+    assert not (output_dir / "ir").exists()
+    assert not (output_dir / "mineru_raw").exists()
+    assert list((output_dir / "assets" / "crops").iterdir())
+    report = read_json(output_dir / "run_report.json")
+    assert report["output_retention"]["mode"] == "slim"
 
 
 def test_mineru_hybrid_pipeline_records_enrichment_without_markdown_noise(tmp_path):

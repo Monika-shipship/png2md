@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,19 +113,78 @@ def build_page_chunks(
 
 
 def estimate_pdf_pages(path: Path) -> int | None:
-    try:
-        from pypdf import PdfReader  # type: ignore
-
-        reader = PdfReader(str(path))
-        return len(reader.pages) or None
-    except Exception:
-        pass
+    pages = _estimate_pdf_pages_with_python_lib(path)
+    if pages:
+        return pages
+    pages = _estimate_pdf_pages_with_pdfinfo(path)
+    if pages:
+        return pages
     try:
         data = path.read_bytes()
     except OSError:
         return None
-    count = len(re.findall(rb"/Type\s*/Page(?!s)\b", data))
-    return count or None
+    direct_count = _count_pdf_page_markers(data)
+    stream_count = _count_pdf_page_markers_in_object_streams(data)
+    return (direct_count + stream_count) or None
+
+
+def _estimate_pdf_pages_with_python_lib(path: Path) -> int | None:
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        return len(PdfReader(str(path)).pages) or None
+    except Exception:
+        pass
+    try:
+        from PyPDF2 import PdfReader  # type: ignore
+
+        return len(PdfReader(str(path)).pages) or None
+    except Exception:
+        return None
+
+
+def _estimate_pdf_pages_with_pdfinfo(path: Path) -> int | None:
+    try:
+        completed = subprocess.run(
+            ["pdfinfo", str(path)],
+            check=False,
+            capture_output=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    stdout = (completed.stdout or b"").decode("utf-8", errors="ignore")
+    match = re.search(r"(?im)^\s*Pages:\s*(\d+)\s*$", stdout)
+    if not match:
+        return None
+    pages = int(match.group(1))
+    return pages or None
+
+
+def _count_pdf_page_markers(data: bytes) -> int:
+    return len(re.findall(rb"/Type\s*/Page(?!s)\b|/Type/Page(?!s)\b", data))
+
+
+def _count_pdf_page_markers_in_object_streams(data: bytes) -> int:
+    count = 0
+    stream_re = re.compile(rb"\d+\s+\d+\s+obj\s*(?P<header><<.*?>>)\s*stream\r?\n?", re.DOTALL)
+    for match in stream_re.finditer(data):
+        header = match.group("header")
+        if b"/ObjStm" not in header or b"/FlateDecode" not in header:
+            continue
+        stream_start = match.end()
+        stream_end = data.find(b"endstream", stream_start)
+        if stream_end < 0:
+            continue
+        raw = data[stream_start:stream_end].strip(b"\r\n")
+        try:
+            decoded = zlib.decompress(raw)
+        except zlib.error:
+            continue
+        count += _count_pdf_page_markers(decoded)
+    return count
 
 
 def estimate_path_pages(path: Path, page_ranges: str = "") -> int | None:

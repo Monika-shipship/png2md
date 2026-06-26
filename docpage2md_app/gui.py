@@ -159,11 +159,27 @@ CONCURRENCY_PRESETS = {
     "自定义": None,
 }
 
+OUTPUT_RETENTION_LABELS = {
+    "slim": "精简（推荐）",
+    "standard": "标准（保留 IR）",
+    "debug": "调试（保留原始数据）",
+}
+OUTPUT_RETENTION_LABEL_TO_KEY = {label: key for key, label in OUTPUT_RETENTION_LABELS.items()}
+
 BRAIN_THINKING_LABELS = {
     "disabled": "快速：关闭思考（推荐）",
     "enabled": "高质量：开启思考",
 }
 BRAIN_THINKING_LABEL_TO_KEY = {label: key for key, label in BRAIN_THINKING_LABELS.items()}
+BRAIN_CONTEXT_RADIUS_LABELS = {
+    "0": "仅当前页",
+    "1": "前后1页",
+    "2": "前后2页（推荐）",
+    "3": "前后3页",
+    "5": "前后5页",
+    "custom": "自定义",
+}
+BRAIN_CONTEXT_RADIUS_LABEL_TO_KEY = {label: key for key, label in BRAIN_CONTEXT_RADIUS_LABELS.items()}
 
 SOURCE_LABELS = {
     "input_file": "本地单个文件",
@@ -269,8 +285,12 @@ class GuiRunOptions:
     paddleocr_table_recognition: bool = AppConfig().paddleocr_table_recognition
     paddleocr_visualize: bool = AppConfig().paddleocr_visualize
     recursive: bool = False
+    output_retention: str = AppConfig().output_retention
+    parser_workers: int | str = AppConfig().parser_workers
+    doc_workers: int | str = AppConfig().max_docpage_workers
     vision_workers: int | str = AppConfig().vision_batch_workers
     brain_workers: int | str = AppConfig().brain_batch_workers
+    brain_context_radius: int | str = AppConfig().brain_context_radius
     brain_thinking: str = AppConfig().brain_thinking
     brain_reasoning_effort: str = AppConfig().brain_reasoning_effort
     vision: SelectedModel | None = None
@@ -292,11 +312,37 @@ class CostEstimateRow:
     name: str
     pages: int | None
     crop_blocks: int | None
+    vision_input_tokens: int
+    vision_output_tokens: int
+    vision_cost: float | None
+    brain_input_tokens: int
+    brain_output_tokens: int
+    brain_cost: float | None
+    total_cost: float | None
+    confidence: str
+    note: str = ""
+
+    @property
+    def input_tokens(self) -> int:
+        return self.vision_input_tokens + self.brain_input_tokens
+
+    @property
+    def output_tokens(self) -> int:
+        return self.vision_output_tokens + self.brain_output_tokens
+
+    @property
+    def estimated_cost(self) -> float | None:
+        return self.total_cost
+
+
+@dataclass(frozen=True)
+class BrainWindowCostRow:
+    radius: int
+    label: str
     input_tokens: int
     output_tokens: int
     estimated_cost: float | None
     confidence: str
-    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -308,6 +354,7 @@ class CostEstimateSummary:
     total_cost: float | None
     confidence: str
     note: str
+    brain_window_rows: list[BrainWindowCostRow] = field(default_factory=list)
 
     def format_brief(self) -> str:
         page_text = "未知页数" if self.total_pages is None else f"{self.total_pages} 页"
@@ -367,8 +414,19 @@ def model_profile_label(value: str) -> str:
     return MODEL_PROFILE_LABELS.get(model_profile_key(value), value)
 
 
+def output_retention_key(value: str) -> str:
+    return OUTPUT_RETENTION_LABEL_TO_KEY.get(value, value)
+
+
 def source_kind_key(value: str) -> str:
     return SOURCE_LABEL_TO_KEY.get(value, value)
+
+
+def brain_context_radius_value(value: int | str, custom_value: int | str | None = None) -> int:
+    key = BRAIN_CONTEXT_RADIUS_LABEL_TO_KEY.get(str(value), str(value))
+    if key == "custom":
+        return _non_negative_count(custom_value if custom_value is not None else AppConfig().brain_context_radius, "Brain 上下文窗口")
+    return _non_negative_count(key, "Brain 上下文窗口")
 
 
 def default_model_selection(profile: str = "balanced", base_config: AppConfig | None = None) -> tuple[SelectedModel, SelectedModel]:
@@ -400,6 +458,9 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
         raise ValueError(f"未知文档类型: {options.document_type}")
     if model_profile not in {"cheap", "balanced", "accurate", "manual"}:
         raise ValueError(f"未知模型档位: {options.model_profile}")
+    output_retention = output_retention_key(options.output_retention)
+    if output_retention not in OUTPUT_RETENTION_LABELS:
+        raise ValueError(f"未知输出保留模式: {options.output_retention}")
     if source_kind not in SOURCE_LABELS:
         raise ValueError(f"未知输入来源: {options.source_kind}")
     if source_kind == "mineru_artifact_dir" and layout_engine != "mineru":
@@ -429,6 +490,8 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
         document_type,
         "--model-profile",
         model_profile,
+        "--output-retention",
+        output_retention,
         "--output",
         options.output_folder,
     ]
@@ -481,6 +544,9 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
     )
     vision_workers = _positive_worker_count(options.vision_workers, "Vision 并发数")
     brain_workers = _positive_worker_count(options.brain_workers, "Brain 并发数")
+    parser_workers = _positive_worker_count(options.parser_workers, "解析并发数")
+    doc_workers = _positive_worker_count(options.doc_workers, "文档并发数")
+    brain_context_radius = brain_context_radius_value(options.brain_context_radius)
     brain_thinking = BRAIN_THINKING_LABEL_TO_KEY.get(options.brain_thinking, options.brain_thinking or AppConfig().brain_thinking)
     if brain_thinking not in {"enabled", "disabled"}:
         raise ValueError("Brain 思考模式必须是 enabled 或 disabled。")
@@ -493,6 +559,12 @@ def build_cli_argv(options: GuiRunOptions) -> list[str]:
             str(vision_workers),
             "--brain-workers",
             str(brain_workers),
+            "--parser-workers",
+            str(parser_workers),
+            "--doc-workers",
+            str(doc_workers),
+            "--brain-context-radius",
+            str(brain_context_radius),
             "--brain-thinking",
             brain_thinking,
             "--brain-reasoning-effort",
@@ -560,6 +632,16 @@ def _positive_worker_count(value: int | str, label: str) -> int:
         raise ValueError(f"{label}必须是正整数。") from None
     if count < 1:
         raise ValueError(f"{label}必须是正整数。")
+    return count
+
+
+def _non_negative_count(value: int | str, label: str) -> int:
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}必须是 0 或正整数。") from None
+    if count < 0:
+        raise ValueError(f"{label}必须是 0 或正整数。")
     return count
 
 
@@ -785,8 +867,12 @@ def selected_config_from_options(options: GuiRunOptions, base_config: AppConfig 
         paddleocr_formula_recognition=options.paddleocr_formula_recognition,
         paddleocr_table_recognition=options.paddleocr_table_recognition,
         paddleocr_visualize=options.paddleocr_visualize,
+        output_retention=output_retention_key(options.output_retention),
+        parser_workers=_positive_worker_count(options.parser_workers, "解析并发数"),
+        max_docpage_workers=_positive_worker_count(options.doc_workers, "文档并发数"),
         vision_batch_workers=_positive_worker_count(options.vision_workers, "Vision 并发数"),
         brain_batch_workers=_positive_worker_count(options.brain_workers, "Brain 并发数"),
+        brain_context_radius=brain_context_radius_value(options.brain_context_radius),
         brain_thinking=BRAIN_THINKING_LABEL_TO_KEY.get(options.brain_thinking, options.brain_thinking or AppConfig().brain_thinking),
         brain_reasoning_effort=(options.brain_reasoning_effort or AppConfig().brain_reasoning_effort).strip()
         or AppConfig().brain_reasoning_effort,
@@ -828,6 +914,7 @@ def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = No
             total_cost=0.0,
             confidence="高",
             note=f"仅 {engine_label} 模式不会调用 Vision/Brain；这里只显示模型精修成本为 ¥0，不含平台额度/限制。",
+            brain_window_rows=[],
         )
 
     if source_kind in {"mineru_artifact_dir", "paddleocr_artifact_dir"}:
@@ -838,10 +925,10 @@ def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = No
         for path in paths:
             rows.append(_estimate_path_cost_row(path, options, config))
         if not rows:
-            rows = [CostEstimateRow("待选择文件", None, None, 0, 0, None, "低", "还没有可估算的本地文件。")]
+            rows = [_empty_cost_row("待选择文件", None, None, "低", "还没有可估算的本地文件。")]
         note_parts.append("本地文件在解析引擎返回裁剪块前只能按页数和经验 crop 数粗估。")
     else:
-        rows = [CostEstimateRow("远程 URL", None, None, 0, 0, None, "低", "远程文件运行前无法读取页数。")]
+        rows = [_empty_cost_row("远程 URL", None, None, "低", "远程文件运行前无法读取页数。")]
         note_parts.append("远程 URL 运行前无法读取页数，等解析引擎返回后进度会按真实页数更新。")
 
     known_pages = [row.pages for row in rows if row.pages is not None]
@@ -859,6 +946,7 @@ def estimate_gui_cost(options: GuiRunOptions, base_config: AppConfig | None = No
         total_cost=total_cost,
         confidence=confidence,
         note=" ".join(note_parts),
+        brain_window_rows=_estimate_brain_window_cost_rows(total_pages, config),
     )
 
 
@@ -872,7 +960,7 @@ def _estimate_total_pages(options: GuiRunOptions) -> int | None:
 def _estimate_path_cost_row(path: Path, options: GuiRunOptions, config: AppConfig) -> CostEstimateRow:
     pages = estimate_path_pages(path, options.page_ranges)
     if pages is None:
-        return CostEstimateRow(path.name, None, None, 0, 0, None, "低", "无法在运行前确认页数。")
+        return _empty_cost_row(path.name, None, None, "低", "无法在运行前确认页数。")
     if path.suffix.lower() in IMAGE_SUFFIXES:
         return _estimate_cost_from_counts(
             name=path.name,
@@ -906,7 +994,7 @@ def _estimate_artifact_cost_row(path: Path, options: GuiRunOptions, config: AppC
             document_ir = adapt_mineru_artifacts(artifacts, source_path=None, engine_mode=workflow_engine_mode(options))
             image_resolver = resolve_artifact_image
     except Exception as exc:
-        return CostEstimateRow(path.name, None, None, 0, 0, None, "低", f"无法读取 artifact：{exc}")
+        return _empty_cost_row(path.name, None, None, "低", f"无法读取 artifact：{exc}")
     pages = document_ir.get("pages") or []
     page_count = count_page_ranges(options.page_ranges, len(pages))
     if page_count is None:
@@ -970,7 +1058,7 @@ def _estimate_cost_from_counts(
     brain_record = _find_catalog_model(config.brain_provider, config.model_brain, config)
     vision_input = sum(token + ROUGH_VISION_PROMPT_TOKENS for token in image_tokens)
     vision_output = crop_blocks * ROUGH_VISION_OUTPUT_TOKENS
-    brain_input = brain_input_tokens if brain_input_tokens is not None else pages * ROUGH_BRAIN_INPUT_TOKENS_PER_PAGE
+    brain_input = brain_input_tokens if brain_input_tokens is not None else pages * _rough_brain_input_tokens_per_page(config.brain_context_radius)
     brain_output = pages * ROUGH_BRAIN_OUTPUT_TOKENS_PER_PAGE
     vision_cost = estimate_text_cost(vision_input, vision_output, vision_record)
     if vision_cost is None:
@@ -983,9 +1071,13 @@ def _estimate_cost_from_counts(
         name=name,
         pages=pages,
         crop_blocks=crop_blocks,
-        input_tokens=vision_input + brain_input,
-        output_tokens=vision_output + brain_output,
-        estimated_cost=cost,
+        vision_input_tokens=vision_input,
+        vision_output_tokens=vision_output,
+        vision_cost=vision_cost,
+        brain_input_tokens=brain_input,
+        brain_output_tokens=brain_output,
+        brain_cost=brain_cost,
+        total_cost=cost,
         confidence=confidence,
         note=note,
     )
@@ -1003,7 +1095,7 @@ def _estimate_brain_input_tokens_from_pages(pages: list[dict], config: AppConfig
 
     total = 0
     for index, page in enumerate(pages):
-        prompt = _brain_ops_prompt(page, _context_window_for_cost(pages, index))
+        prompt = _brain_ops_prompt(page, _context_window_for_cost(pages, index, radius=config.brain_context_radius))
         total += estimate_deepseek_chat_tokens([{"role": "user", "content": prompt}])
     return total, "DeepSeek 输入 token 使用内置 tokenizer 按真实 Brain prompt 估算。"
 
@@ -1012,6 +1104,61 @@ def _context_window_for_cost(pages: list[dict], page_index: int, radius: int = 2
     start = max(0, page_index - radius)
     end = min(len(pages), page_index + radius + 1)
     return [pages[index] for index in range(start, end)]
+
+
+def _rough_brain_input_tokens_per_page(radius: int | str) -> int:
+    try:
+        value = max(0, int(radius))
+    except (TypeError, ValueError):
+        value = AppConfig().brain_context_radius
+    return ROUGH_BRAIN_INPUT_TOKENS_PER_PAGE + value * 1600
+
+
+def _estimate_brain_window_cost_rows(total_pages: int | None, config: AppConfig) -> list[BrainWindowCostRow]:
+    if total_pages is None or total_pages <= 0:
+        return []
+    brain_record = _find_catalog_model(config.brain_provider, config.model_brain, config)
+    rows: list[BrainWindowCostRow] = []
+    for radius in (0, 1, 2, 3, 5):
+        input_tokens = total_pages * _rough_brain_input_tokens_per_page(radius)
+        output_tokens = total_pages * ROUGH_BRAIN_OUTPUT_TOKENS_PER_PAGE
+        cost = estimate_text_cost(input_tokens, output_tokens, brain_record)
+        if cost is None:
+            cost = estimate_price(config.model_brain, input_tokens, output_tokens)
+        rows.append(
+            BrainWindowCostRow(
+                radius=radius,
+                label="仅当前页" if radius == 0 else f"前后{radius}页",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost=cost,
+                confidence="中",
+            )
+        )
+    return rows
+
+
+def _empty_cost_row(
+    name: str,
+    pages: int | None,
+    crop_blocks: int | None,
+    confidence: str,
+    note: str,
+) -> CostEstimateRow:
+    return CostEstimateRow(
+        name=name,
+        pages=pages,
+        crop_blocks=crop_blocks,
+        vision_input_tokens=0,
+        vision_output_tokens=0,
+        vision_cost=None,
+        brain_input_tokens=0,
+        brain_output_tokens=0,
+        brain_cost=None,
+        total_cost=None,
+        confidence=confidence,
+        note=note,
+    )
 
 
 def _find_catalog_model(provider: str, model_id: str, config: AppConfig):
@@ -1637,9 +1784,14 @@ class DocPage2MdGui:
         self.show_mineru_advanced = tk.BooleanVar(value=False)
         self.show_paddleocr_advanced = tk.BooleanVar(value=False)
         self.recursive = tk.BooleanVar(value=False)
+        self.output_retention = tk.StringVar(value=OUTPUT_RETENTION_LABELS[self.base_config.output_retention])
+        self.parser_workers = tk.StringVar(value=str(self.base_config.parser_workers))
+        self.doc_workers = tk.StringVar(value=str(self.base_config.max_docpage_workers))
         self.concurrency_preset = tk.StringVar(value="极速 60/60（默认）")
         self.vision_workers = tk.StringVar(value=str(self.base_config.vision_batch_workers))
         self.brain_workers = tk.StringVar(value=str(self.base_config.brain_batch_workers))
+        self.brain_context_radius = tk.StringVar(value=BRAIN_CONTEXT_RADIUS_LABELS[str(self.base_config.brain_context_radius)])
+        self.brain_context_custom = tk.StringVar(value=str(self.base_config.brain_context_radius))
         self.brain_thinking = tk.StringVar(value=BRAIN_THINKING_LABELS.get(self.base_config.brain_thinking, BRAIN_THINKING_LABELS["disabled"]))
         self.brain_reasoning_effort = tk.StringVar(value=self.base_config.brain_reasoning_effort)
         self.vision_provider = tk.StringVar(value=default_vision.provider)
@@ -1899,8 +2051,16 @@ class DocPage2MdGui:
         ttk.Label(out, text="页码范围").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(out, textvariable=self.page_ranges).grid(row=2, column=1, sticky="ew", pady=4)
         ttk.Label(out, text="空=全量").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=4)
+        ttk.Label(out, text="保留模式").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            out,
+            textvariable=self.output_retention,
+            values=[OUTPUT_RETENTION_LABELS[key] for key in ("slim", "standard", "debug")],
+            state="readonly",
+        ).grid(row=3, column=1, sticky="ew", pady=4)
+        self._help_button(out, "output_retention").grid(row=3, column=2, padx=(8, 0), pady=4)
         advanced_toggle = ttk.Frame(out)
-        advanced_toggle.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        advanced_toggle.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         advanced_toggle.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             advanced_toggle,
@@ -1924,7 +2084,7 @@ class DocPage2MdGui:
         ttk.Entry(self.mineru_advanced_frame, textvariable=self.mineru_page_chunk_size, width=8).grid(row=2, column=3, sticky="w", pady=3)
 
         paddle_toggle = ttk.Frame(out)
-        paddle_toggle.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        paddle_toggle.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         paddle_toggle.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             paddle_toggle,
@@ -1945,10 +2105,10 @@ class DocPage2MdGui:
         ttk.Checkbutton(self.paddleocr_advanced_frame, text="版面检测", variable=self.paddleocr_layout_detection).grid(row=2, column=0, sticky="w", pady=3)
         ttk.Checkbutton(self.paddleocr_advanced_frame, text="公式识别", variable=self.paddleocr_formula_recognition).grid(row=2, column=1, sticky="w", pady=3)
         ttk.Checkbutton(self.paddleocr_advanced_frame, text="表格识别", variable=self.paddleocr_table_recognition).grid(row=2, column=2, sticky="w", pady=3)
-        ttk.Checkbutton(self.paddleocr_advanced_frame, text="保存可视化图", variable=self.paddleocr_visualize).grid(row=2, column=3, sticky="w", pady=3)
+        ttk.Checkbutton(self.paddleocr_advanced_frame, text="保存可视化图（调试）", variable=self.paddleocr_visualize).grid(row=2, column=3, sticky="w", pady=3)
 
         concurrency = ttk.LabelFrame(out, text="并发", padding=8)
-        concurrency.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        concurrency.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         concurrency.columnconfigure(1, weight=1)
         ttk.Label(concurrency, text="档位").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Combobox(
@@ -1958,33 +2118,48 @@ class DocPage2MdGui:
             state="readonly",
         ).grid(row=0, column=1, columnspan=3, sticky="ew", pady=3)
         self._help_button(concurrency, "concurrency").grid(row=0, column=4, padx=(6, 0), pady=3)
-        ttk.Label(concurrency, text="Vision").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(concurrency, textvariable=self.vision_workers, width=8).grid(row=1, column=1, sticky="w", pady=3)
-        ttk.Label(concurrency, text="Brain").grid(row=1, column=2, sticky="w", padx=(14, 8), pady=3)
-        ttk.Entry(concurrency, textvariable=self.brain_workers, width=8).grid(row=1, column=3, sticky="w", pady=3)
-        ttk.Label(concurrency, text="Brain 模式").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(concurrency, text="解析").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(concurrency, textvariable=self.parser_workers, width=8).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(concurrency, text="文档").grid(row=1, column=2, sticky="w", padx=(14, 8), pady=3)
+        ttk.Entry(concurrency, textvariable=self.doc_workers, width=8).grid(row=1, column=3, sticky="w", pady=3)
+        ttk.Label(concurrency, text="Vision").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(concurrency, textvariable=self.vision_workers, width=8).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(concurrency, text="Brain").grid(row=2, column=2, sticky="w", padx=(14, 8), pady=3)
+        ttk.Entry(concurrency, textvariable=self.brain_workers, width=8).grid(row=2, column=3, sticky="w", pady=3)
+        ttk.Label(concurrency, text="Brain 模式").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Combobox(
             concurrency,
             textvariable=self.brain_thinking,
             values=list(BRAIN_THINKING_LABELS.values()),
             state="readonly",
             width=22,
-        ).grid(row=2, column=1, sticky="w", pady=3)
-        ttk.Label(concurrency, text="强度").grid(row=2, column=2, sticky="w", padx=(14, 8), pady=3)
+        ).grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(concurrency, text="强度").grid(row=3, column=2, sticky="w", padx=(14, 8), pady=3)
         ttk.Combobox(
             concurrency,
             textvariable=self.brain_reasoning_effort,
             values=["high", "max"],
             state="readonly",
             width=8,
-        ).grid(row=2, column=3, sticky="w", pady=3)
+        ).grid(row=3, column=3, sticky="w", pady=3)
+        ttk.Label(concurrency, text="上下文").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Combobox(
+            concurrency,
+            textvariable=self.brain_context_radius,
+            values=list(BRAIN_CONTEXT_RADIUS_LABELS.values()),
+            state="readonly",
+            width=18,
+        ).grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Label(concurrency, text="自定义").grid(row=4, column=2, sticky="w", padx=(14, 8), pady=3)
+        ttk.Entry(concurrency, textvariable=self.brain_context_custom, width=8).grid(row=4, column=3, sticky="w", pady=3)
+        self._help_button(concurrency, "brain_context").grid(row=4, column=4, padx=(6, 0), pady=3)
         self.concurrency_hint_label = ttk.Label(
             concurrency,
-            text="极速 60/60 保留原来的高并发；默认关闭 Brain 思考以降低延迟，需要疑难页再开启高质量模式。",
+            text="极速 60/60 保留原来的高并发；Brain 默认读取前后2页上下文。窗口越大越利于上下文纠错，也越贵、越慢。",
             wraplength=420,
             justify="left",
         )
-        self.concurrency_hint_label.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(4, 0))
+        self.concurrency_hint_label.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(4, 0))
 
         def _resize_concurrency_hint(event) -> None:
             self.concurrency_hint_label.configure(wraplength=max(260, event.width - 16))
@@ -2031,7 +2206,7 @@ class DocPage2MdGui:
         ttk.Button(cost_actions, text="刷新官方模型/价格", command=self._refresh_official_models_and_prices).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
         )
-        cost_columns = ("file", "pages", "crops", "input", "output", "cost", "confidence")
+        cost_columns = ("file", "pages", "crops", "v_in", "v_out", "v_cost", "b_in", "b_out", "b_cost", "cost", "confidence")
         cost_table = ttk.Frame(command)
         cost_table.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         cost_table.columnconfigure(0, weight=1)
@@ -2040,9 +2215,13 @@ class DocPage2MdGui:
             ("file", "文件", 220),
             ("pages", "页数", 70),
             ("crops", "裁剪块", 70),
-            ("input", "输入tokens", 110),
-            ("output", "输出tokens", 110),
-            ("cost", "费用", 84),
+            ("v_in", "Vision输入", 96),
+            ("v_out", "Vision输出", 96),
+            ("v_cost", "Vision费用", 90),
+            ("b_in", "Brain输入", 96),
+            ("b_out", "Brain输出", 96),
+            ("b_cost", "Brain费用", 90),
+            ("cost", "总费用", 84),
             ("confidence", "可信度", 84),
         ]:
             self.cost_tree.heading(col, text=label)
@@ -2054,8 +2233,28 @@ class DocPage2MdGui:
         cost_x_scroll.grid(row=1, column=0, sticky="ew")
         self.cost_tree.configure(yscrollcommand=cost_y_scroll.set, xscrollcommand=cost_x_scroll.set)
 
+        window_columns = ("window", "input", "output", "cost", "confidence")
+        window_table = ttk.Frame(command)
+        window_table.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        window_table.columnconfigure(0, weight=1)
+        ttk.Label(window_table, text="Brain 窗口成本对比").grid(row=0, column=0, sticky="w")
+        self.brain_window_cost_tree = ttk.Treeview(window_table, columns=window_columns, show="headings", height=3)
+        for col, label, width in [
+            ("window", "窗口", 120),
+            ("input", "输入tokens", 110),
+            ("output", "输出tokens", 110),
+            ("cost", "Brain费用", 100),
+            ("confidence", "可信度", 84),
+        ]:
+            self.brain_window_cost_tree.heading(col, text=label)
+            self.brain_window_cost_tree.column(col, width=width, minwidth=width, anchor="w", stretch=False)
+        self.brain_window_cost_tree.grid(row=1, column=0, sticky="ew")
+        window_x_scroll = ttk.Scrollbar(window_table, orient="horizontal", command=self.brain_window_cost_tree.xview)
+        window_x_scroll.grid(row=2, column=0, sticky="ew")
+        self.brain_window_cost_tree.configure(xscrollcommand=window_x_scroll.set)
+
         command_preview_frame = ttk.Frame(command)
-        command_preview_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        command_preview_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         command_preview_frame.columnconfigure(0, weight=1)
         command_tools = ttk.Frame(command_preview_frame)
         command_tools.grid(row=0, column=0, sticky="ew")
@@ -2292,13 +2491,31 @@ class DocPage2MdGui:
                 "成本估算只估 Vision/Brain 模型费用。\n\n"
                 "MinerU：不计入人民币费用，只提示页数/平台限制。\n"
                 "PaddleOCR：按额度/限制显示，不计入模型 token 成本。\n\n"
+                "主表会拆开 Vision 与 Brain 的输入、输出和费用。Brain 窗口成本对比只比较不同上下文半径下 Brain 阶段的费用，不会改变当前运行设置。\n\n"
                 "可信度：\n"
                 "高=已有 artifact，可按真实 crop 和 prompt 估算。\n"
                 "中=本地 PDF/图片，可读页数/尺寸，但不知道 MinerU 真实 crop。\n"
                 "低=URL、Office 或页数未知。"
             ),
+            "output_retention": (
+                "输出保留模式决定最终目录里保存多少中间文件。\n\n"
+                "精简：默认推荐。保留 Slide_XX.md、FULL.md、Markdown 引用到的 assets、meta、process.log 和 run_report.json；不复制 raw artifact，不保留解析缓存，体积最小。\n"
+                "标准：在精简基础上额外保留 ir/document_ir.json 和每页 IR，方便排查结构化内容。\n"
+                "调试：完整保留 MinerU/PaddleOCR 原始 artifact、IR 和解析缓存，最适合定位 API 返回内容，但会明显占用磁盘。\n\n"
+                "保留模式不会删除用户手动指定的 artifact 目录，也不会碰 markdown_output/已归档。"
+            ),
+            "brain_context": (
+                "Brain 上下文窗口决定每页审阅时能看到多少相邻页。\n\n"
+                "仅当前页：最省 token，适合页面相互独立的材料。\n"
+                "前后1页：适合普通论文、讲义。\n"
+                "前后2页：默认推荐，兼顾上下文纠错和费用。\n"
+                "前后3/5页：适合术语前后呼应强、跨页推导多的手写笔记，但 prompt 更长、费用和延迟更高。\n\n"
+                "窗口不会让 Brain 自由改整页。Brain 只能提出绑定 block/span 的 op，最后仍要经过 checked ops 和 Validator。"
+            ),
             "concurrency": (
-                "并发控制的是 DocPage2MD 精修阶段，不影响 MinerU/PaddleOCR 平台解析额度。\n\n"
+                "并发分成四类：解析、文档、Vision、Brain。\n\n"
+                "解析并发：多个本地文件同时提交/等待 MinerU 和 PaddleOCR。双引擎时，每个文件内部还会同时提交 MinerU 与 PaddleOCR。\n"
+                "文档并发：已有解析结果后，同时处理多少份文档。每份文档内部还会继续开 Vision/Brain 并发；调太高会放大 API 请求数。\n"
                 "Vision 并发：同时识别多少个裁剪图、公式图、表格图。\n"
                 "Brain 并发：同时精修多少页 Markdown 结构。当前 Brain 任务粒度是“每页一个请求”，所以实际 Brain 并发=min(页数, Brain worker 上限)。11 页 PDF 最多只有 11 个 Brain 请求，不会用满 100/200。\n\n"
                 "Brain 模式：默认“快速：关闭思考”。它会关闭 DeepSeek/DashScope Brain 的深度思考参数，适合 JSON/Markdown 结构修正，通常能减少长尾耗时和输出 token。遇到疑难公式、复杂推理页时，可改为“高质量：开启思考”。\n\n"
@@ -2311,13 +2528,13 @@ class DocPage2MdGui:
 
     def _toggle_mineru_advanced(self) -> None:
         if self.show_mineru_advanced.get():
-            self.mineru_advanced_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+            self.mineru_advanced_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 6))
         else:
             self.mineru_advanced_frame.grid_remove()
 
     def _toggle_paddleocr_advanced(self) -> None:
         if self.show_paddleocr_advanced.get():
-            self.paddleocr_advanced_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+            self.paddleocr_advanced_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 6))
         else:
             self.paddleocr_advanced_frame.grid_remove()
 
@@ -2692,9 +2909,14 @@ class DocPage2MdGui:
             self.paddleocr_table_recognition,
             self.paddleocr_visualize,
             self.recursive,
+            self.output_retention,
+            self.parser_workers,
+            self.doc_workers,
             self.concurrency_preset,
             self.vision_workers,
             self.brain_workers,
+            self.brain_context_radius,
+            self.brain_context_custom,
             self.brain_thinking,
             self.brain_reasoning_effort,
             self.vision_provider,
@@ -3067,8 +3289,16 @@ class DocPage2MdGui:
             paddleocr_table_recognition=self.paddleocr_table_recognition.get(),
             paddleocr_visualize=self.paddleocr_visualize.get(),
             recursive=self.recursive.get(),
+            output_retention=self.output_retention.get(),
+            parser_workers=self.parser_workers.get(),
+            doc_workers=self.doc_workers.get(),
             vision_workers=self.vision_workers.get(),
             brain_workers=self.brain_workers.get(),
+            brain_context_radius=(
+                self.brain_context_custom.get()
+                if BRAIN_CONTEXT_RADIUS_LABEL_TO_KEY.get(self.brain_context_radius.get(), self.brain_context_radius.get()) == "custom"
+                else self.brain_context_radius.get()
+            ),
             brain_thinking=self.brain_thinking.get(),
             brain_reasoning_effort=self.brain_reasoning_effort.get(),
             vision=SelectedModel(
@@ -3140,13 +3370,19 @@ class DocPage2MdGui:
             parser_model = f"MinerU {mineru_model} + PaddleOCR {self.paddleocr_model.get()}"
         else:
             parser_model = layout
+        try:
+            brain_radius = brain_context_radius_value(self._options().brain_context_radius)
+            brain_context_text = f"前后{brain_radius}页" if brain_radius else "仅当前页"
+        except ValueError:
+            brain_context_text = "配置需调整"
         self.run_summary_text.set(
             "文档类型只设置推荐值，可手动覆盖模式、档位和模型。\n"
             f"当前：{DOCUMENT_PRESETS.get(document_key, DOCUMENT_PRESETS['custom'])[0]} / "
             f"{ENGINE_MODE_LABELS.get(mode_key, mode_key)} / {LAYOUT_ENGINE_LABELS.get(layout, layout)} / "
             f"{REFINE_MODE_LABELS.get(refine, refine)} / {MODEL_PROFILE_LABELS.get(profile_key, profile_key)} / {parser_model}\n"
-            f"并发：{self.concurrency_preset.get()}，Vision={self.vision_workers.get() or '?'}，Brain={self.brain_workers.get() or '?'}，"
-            f"Brain模式={self.brain_thinking.get()}"
+            f"保留={self.output_retention.get()}，解析并发={self.parser_workers.get() or '?'}，文档并发={self.doc_workers.get() or '?'}，"
+            f"Vision={self.vision_workers.get() or '?'}，Brain={self.brain_workers.get() or '?'}，"
+            f"Brain窗口={brain_context_text}，Brain模式={self.brain_thinking.get()}"
         )
 
     def _refresh_cost_estimate(self, silent: bool = False) -> None:
@@ -3160,18 +3396,7 @@ class DocPage2MdGui:
         if hasattr(self, "cost_tree"):
             for item_id in self.cost_tree.get_children():
                 self.cost_tree.delete(item_id)
-            rows = summary.rows or [
-                CostEstimateRow(
-                    "平台解析",
-                    summary.total_pages,
-                    0,
-                    summary.total_input_tokens,
-                    summary.total_output_tokens,
-                    summary.total_cost,
-                    summary.confidence,
-                    summary.note,
-                )
-            ]
+            rows = summary.rows or [_empty_cost_row("平台解析", summary.total_pages, 0, summary.confidence, summary.note)]
             for index, row in enumerate(rows, start=1):
                 self.cost_tree.insert(
                     "",
@@ -3181,6 +3406,26 @@ class DocPage2MdGui:
                         row.name,
                         "未知" if row.pages is None else row.pages,
                         "未知" if row.crop_blocks is None else row.crop_blocks,
+                        _format_token_count(row.vision_input_tokens),
+                        _format_token_count(row.vision_output_tokens),
+                        "未知" if row.vision_cost is None else f"¥{row.vision_cost:.2f}",
+                        _format_token_count(row.brain_input_tokens),
+                        _format_token_count(row.brain_output_tokens),
+                        "未知" if row.brain_cost is None else f"¥{row.brain_cost:.2f}",
+                        "未知" if row.total_cost is None else f"¥{row.total_cost:.2f}",
+                        row.confidence,
+                    ),
+                )
+        if hasattr(self, "brain_window_cost_tree"):
+            for item_id in self.brain_window_cost_tree.get_children():
+                self.brain_window_cost_tree.delete(item_id)
+            for index, row in enumerate(summary.brain_window_rows, start=1):
+                self.brain_window_cost_tree.insert(
+                    "",
+                    "end",
+                    iid=f"brain-window-cost-{index}",
+                    values=(
+                        row.label,
                         _format_token_count(row.input_tokens),
                         _format_token_count(row.output_tokens),
                         "未知" if row.estimated_cost is None else f"¥{row.estimated_cost:.2f}",

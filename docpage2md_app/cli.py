@@ -6,12 +6,12 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from multiprocessing import Manager
 from pathlib import Path
 
-from .config import AppConfig
+from .config import OUTPUT_RETENTION_MODES, AppConfig
 from .eval import DEFAULT_EVAL_FIXTURE_DIR, DEFAULT_EVAL_OUTPUT_PATH
 from .input_inspection import (
     MINERU_SINGLE_REQUEST_PAGE_LIMIT,
@@ -23,6 +23,7 @@ from .input_inspection import (
     validate_mineru_model_version_for_paths,
 )
 from .model_profiles import apply_model_profile
+from .output_retention import cleanup_cache_for_artifact_dir, cleanup_generated_cache_dir, output_retention_mode, should_copy_raw_artifacts
 from .run_logger import RunLogger, safe_progress
 
 
@@ -50,6 +51,12 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="DocPage2MD (MinerU / vision document pages to Markdown)")
     parser.add_argument("-n", "--name", type=str, default="default", help="任务会话名称")
     parser.add_argument("-o", "--output", type=str, default="./markdown_output", help="输出目录路径")
+    parser.add_argument(
+        "--output-retention",
+        choices=list(OUTPUT_RETENTION_MODES),
+        default=AppConfig().output_retention,
+        help="输出保留模式：slim=默认精简，standard=保留 IR，debug=保留原始解析 artifact/cache",
+    )
     parser.add_argument(
         "--engine-mode",
         choices=["vision_only", "mineru_only", "hybrid", "mineru_hybrid", "paddleocr_only", "paddleocr_hybrid", "dual_hybrid"],
@@ -80,6 +87,14 @@ def parse_args(argv=None):
     parser.add_argument("--brain-api-key-env", type=str, default=None, help="非交互覆盖 Brain API Key 环境变量名")
     parser.add_argument("--vision-workers", type=int, default=None, help="Vision/crop Vision 并发数，默认使用配置值")
     parser.add_argument("--brain-workers", type=int, default=None, help="Brain/refiner 页级并发数，默认使用配置值")
+    parser.add_argument("--parser-workers", type=int, default=None, help="多文件解析上传/等待并发数，默认 8；不影响 Vision/Brain 页级并发")
+    parser.add_argument("--doc-workers", type=int, default=None, help="多文件文档级处理并发数，默认 1；每个文档内部仍按 Vision/Brain 并发处理")
+    parser.add_argument(
+        "--brain-context-radius",
+        type=int,
+        default=None,
+        help="Brain 审阅上下文窗口半径；N 表示当前页前后各 N 页，默认 2，可设 0 仅审阅当前页",
+    )
     parser.add_argument(
         "--brain-thinking",
         choices=["enabled", "disabled"],
@@ -193,6 +208,11 @@ def ensure_dependencies():
 def build_config(args):
     vision_workers = _positive_optional_int(args.vision_workers, "--vision-workers") or AppConfig().vision_batch_workers
     brain_workers = _positive_optional_int(args.brain_workers, "--brain-workers") or AppConfig().brain_batch_workers
+    parser_workers = _positive_optional_int(args.parser_workers, "--parser-workers") or AppConfig().parser_workers
+    doc_workers = _positive_optional_int(args.doc_workers, "--doc-workers") or AppConfig().max_docpage_workers
+    brain_context_radius = _non_negative_optional_int(args.brain_context_radius, "--brain-context-radius")
+    if brain_context_radius is None:
+        brain_context_radius = AppConfig().brain_context_radius
     engine_mode, layout_engine, refine_mode = _resolve_workflow(args)
     config = AppConfig(
         session_name=args.name,
@@ -225,6 +245,7 @@ def build_config(args):
         paddleocr_formula_recognition=AppConfig().paddleocr_formula_recognition if args.paddleocr_formula_recognition is None else args.paddleocr_formula_recognition,
         paddleocr_table_recognition=AppConfig().paddleocr_table_recognition if args.paddleocr_table_recognition is None else args.paddleocr_table_recognition,
         paddleocr_visualize=AppConfig().paddleocr_visualize if args.paddleocr_visualize is None else args.paddleocr_visualize,
+        output_retention=args.output_retention,
         region=args.region,
         openai_base_url=args.base_url,
         model_cache_path=args.model_cache,
@@ -232,6 +253,9 @@ def build_config(args):
         verify_sleep=args.verify_sleep,
         vision_batch_workers=vision_workers,
         brain_batch_workers=brain_workers,
+        parser_workers=parser_workers,
+        max_docpage_workers=doc_workers,
+        brain_context_radius=brain_context_radius,
         brain_thinking=args.brain_thinking or AppConfig().brain_thinking,
         brain_reasoning_effort=args.brain_reasoning_effort or AppConfig().brain_reasoning_effort,
         list_models=args.list_models,
@@ -295,6 +319,14 @@ def _positive_optional_int(value: int | None, label: str) -> int | None:
         return None
     if value < 1:
         raise ValueError(f"{label} must be a positive integer.")
+    return value
+
+
+def _non_negative_optional_int(value: int | None, label: str) -> int | None:
+    if value is None:
+        return None
+    if value < 0:
+        raise ValueError(f"{label} must be a non-negative integer.")
     return value
 
 
@@ -1080,12 +1112,22 @@ def _run_dual_cli(args, config: AppConfig) -> int:
     try:
         validate_mineru_model_version_for_paths(local_files, config.mineru_model_version)
         _validate_dual_page_limits(local_files, args, config)
-        mineru_client = MinerUClient(config, progress=run_logger)
-        paddle_client = PaddleOCRClient(config, progress=run_logger)
-        processed_count = 0
         for source in local_files:
             _validate_paddleocr_size(source)
-            output_doc_name = doc_name if len(local_files) == 1 else None
+        parser_workers = min(len(local_files), max(1, config.parser_workers))
+        doc_workers = min(len(local_files), max(1, config.max_docpage_workers))
+        safe_progress(
+            run_logger,
+            (
+                f"Dual local scheduler start: files={len(local_files)}, parser_workers={parser_workers}, "
+                f"doc_workers={doc_workers}, per_file_engines=2, vision_workers={config.vision_batch_workers}, "
+                f"brain_workers={config.brain_batch_workers}"
+            ),
+        )
+
+        def _prepare_source(source: Path) -> tuple[Path, Path, Path]:
+            mineru_client = MinerUClient(config, progress=run_logger)
+            paddle_client = PaddleOCRClient(config, progress=run_logger)
             safe_progress(run_logger, f"Dual parser submit start: source={source.name}, mode=parallel")
             mineru_artifact, paddle_artifact = _prepare_dual_artifacts_for_source(
                 mineru_client,
@@ -1095,17 +1137,42 @@ def _run_dual_cli(args, config: AppConfig) -> int:
                 source=source,
                 progress=run_logger,
             )
+            return source, mineru_artifact, paddle_artifact
 
+        def _process_ready_artifacts(source: Path, mineru_artifact: Path, paddle_artifact: Path) -> dict:
+            output_doc_name = doc_name if len(local_files) == 1 else None
+            doc_progress = _per_dual_document_progress(config, args, str(source), output_doc_name, run_logger)
+            safe_progress(doc_progress, f"Dual document processing start: source={source.name}")
             result = process_dual_artifact_task(
                 mineru_artifact,
                 paddle_artifact,
                 config,
                 doc_name=output_doc_name,
                 source_path=str(source),
-                progress=_per_dual_document_progress(config, args, str(source), output_doc_name, run_logger),
+                progress=doc_progress,
             )
-            processed_count += 1
-            print(f"双引擎融合处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
+            cleanup_cache_for_artifact_dir(mineru_artifact, config, expected_cache_root_name=".mineru_cache", progress=run_logger)
+            cleanup_cache_for_artifact_dir(paddle_artifact, config, expected_cache_root_name=".paddleocr_cache", progress=run_logger)
+            return result
+
+        processed_count = 0
+        with ThreadPoolExecutor(max_workers=parser_workers) as parser_executor, ThreadPoolExecutor(max_workers=doc_workers) as doc_executor:
+            parser_futures = {parser_executor.submit(_prepare_source, source): source for source in local_files}
+            doc_futures = {}
+            for future in as_completed(parser_futures):
+                source, mineru_artifact, paddle_artifact = future.result()
+                safe_progress(
+                    run_logger,
+                    f"Dual parser artifacts ready: source={source.name}, mineru={mineru_artifact}, paddleocr={paddle_artifact}",
+                )
+                doc_futures[doc_executor.submit(_process_ready_artifacts, source, mineru_artifact, paddle_artifact)] = source
+
+            for future in as_completed(doc_futures):
+                source = doc_futures[future]
+                result = future.result()
+                processed_count += 1
+                safe_progress(run_logger, f"Dual document done: source={source.name}, pages={result['page_count']}, output={result['output_dir']}")
+                print(f"双引擎融合处理完成：共 {result['page_count']} 页 -> {result['output_dir']}")
         safe_progress(run_logger, f"Dual hybrid local batch complete: {processed_count}/{len(local_files)} files")
         print(f"双引擎融合本地任务完成：{processed_count}/{len(local_files)} 个文件")
         return 0
@@ -1305,7 +1372,7 @@ def _run_chunked_paddleocr_pdf(
         safe_progress(progress, f"PaddleOCR chunk processed: chunk={chunk.index}/{len(chunks)}, pages={processed.get('page_count')}")
 
     safe_progress(progress, "PaddleOCR chunked merge start: combining chunk outputs into final document")
-    _merge_paddleocr_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress)
+    _merge_paddleocr_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress, config=config)
     merge_markdowns(output_dir, output_name)
     report_path = output_dir / "run_report.json"
     if report_path.exists():
@@ -1326,17 +1393,20 @@ def _run_chunked_paddleocr_pdf(
     return 0
 
 
-def _merge_paddleocr_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress) -> None:
+def _merge_paddleocr_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress, config: AppConfig | None = None) -> None:
     from .files import natural_sort_key, read_json, write_json, write_text_atomic
     from .reporting import finalize_run_report
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "assets").mkdir(parents=True, exist_ok=True)
-    (output_dir / "ir").mkdir(parents=True, exist_ok=True)
-    (output_dir / "paddleocr_raw").mkdir(parents=True, exist_ok=True)
+    copy_debug_dirs = config is None or should_copy_raw_artifacts(config)
+    if copy_debug_dirs:
+        (output_dir / "ir").mkdir(parents=True, exist_ok=True)
+        (output_dir / "paddleocr_raw").mkdir(parents=True, exist_ok=True)
     first_report: dict | None = None
     merged_pages: list[dict] = []
     copied_slide_numbers: list[int] = []
+    chunk_dirs_to_cleanup: list[Path] = []
     chunk_by_index = {chunk.index: chunk for chunk in chunks}
     for audit in chunk_audit:
         index = int(audit["index"])
@@ -1344,10 +1414,12 @@ def _merge_paddleocr_chunk_outputs(output_dir: Path, output_name: str, chunk_aud
         chunk_dir = Path(str(audit.get("output_dir") or ""))
         if not chunk_dir.exists():
             continue
+        chunk_dirs_to_cleanup.append(chunk_dir)
         chunk_asset_prefix = f"chunk_{index:03d}"
         _copy_chunk_subdir(chunk_dir / "assets", output_dir / "assets" / chunk_asset_prefix)
-        _copy_chunk_subdir(chunk_dir / "paddleocr_raw", output_dir / "paddleocr_raw" / chunk_asset_prefix)
-        _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
+        if copy_debug_dirs:
+            _copy_chunk_subdir(chunk_dir / "paddleocr_raw", output_dir / "paddleocr_raw" / chunk_asset_prefix)
+            _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
         chunk_report = read_json(chunk_dir / "run_report.json") if (chunk_dir / "run_report.json").exists() else {}
         if first_report is None and chunk_report:
             first_report = chunk_report
@@ -1389,6 +1461,7 @@ def _merge_paddleocr_chunk_outputs(output_dir: Path, output_name: str, chunk_aud
     finalize_run_report(report)
     write_json(output_dir / "run_report.json", report)
     safe_progress(progress, f"PaddleOCR chunked merge copied slides: count={len(set(copied_slide_numbers))}")
+    _cleanup_chunk_output_dirs(chunk_dirs_to_cleanup, output_dir, config=config, progress=progress)
 
 
 def _download_and_process_paddleocr_result(
@@ -1422,7 +1495,7 @@ def _download_and_process_paddleocr_result(
         trace_id=status.trace_id,
     )
     safe_progress(progress, f"Processing PaddleOCR artifact into Markdown: {artifact_dir}")
-    return process_paddleocr_artifact_task(
+    processed = process_paddleocr_artifact_task(
         artifact_dir,
         config,
         doc_name=doc_name,
@@ -1430,6 +1503,8 @@ def _download_and_process_paddleocr_result(
         source_path=source,
         progress=progress,
     )
+    cleanup_generated_cache_dir(cache_dir, config, progress=progress)
+    return processed
 
 
 def _auto_split_plans_for_local_files(local_files: list[Path], args, config: AppConfig) -> dict[Path, list]:
@@ -1571,7 +1646,7 @@ def _run_chunked_mineru_pdf(
         safe_progress(progress, f"MinerU chunk processed: chunk={chunk.index}/{len(chunks)}, pages={processed.get('page_count')}")
 
     safe_progress(progress, "MinerU chunked merge start: combining chunk outputs into final document")
-    _merge_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress)
+    _merge_chunk_outputs(output_dir, output_name, chunk_audit, chunks, progress=progress, config=config)
     merge_markdowns(output_dir, output_name)
     report_path = output_dir / "run_report.json"
     if report_path.exists():
@@ -1591,17 +1666,20 @@ def _run_chunked_mineru_pdf(
     return 0
 
 
-def _merge_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress) -> None:
+def _merge_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[dict], chunks, *, progress, config: AppConfig | None = None) -> None:
     from .files import natural_sort_key, read_json, write_json, write_text_atomic
     from .reporting import finalize_run_report
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "assets").mkdir(parents=True, exist_ok=True)
-    (output_dir / "ir").mkdir(parents=True, exist_ok=True)
-    (output_dir / "mineru_raw").mkdir(parents=True, exist_ok=True)
+    copy_debug_dirs = config is None or should_copy_raw_artifacts(config)
+    if copy_debug_dirs:
+        (output_dir / "ir").mkdir(parents=True, exist_ok=True)
+        (output_dir / "mineru_raw").mkdir(parents=True, exist_ok=True)
     first_report: dict | None = None
     merged_pages: list[dict] = []
     copied_slide_numbers: list[int] = []
+    chunk_dirs_to_cleanup: list[Path] = []
 
     chunk_by_index = {chunk.index: chunk for chunk in chunks}
     for audit in chunk_audit:
@@ -1610,10 +1688,12 @@ def _merge_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[d
         chunk_dir = Path(str(audit.get("output_dir") or ""))
         if not chunk_dir.exists():
             continue
+        chunk_dirs_to_cleanup.append(chunk_dir)
         chunk_asset_prefix = f"chunk_{index:03d}"
         _copy_chunk_subdir(chunk_dir / "assets", output_dir / "assets" / chunk_asset_prefix)
-        _copy_chunk_subdir(chunk_dir / "mineru_raw", output_dir / "mineru_raw" / chunk_asset_prefix)
-        _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
+        if copy_debug_dirs:
+            _copy_chunk_subdir(chunk_dir / "mineru_raw", output_dir / "mineru_raw" / chunk_asset_prefix)
+            _copy_chunk_subdir(chunk_dir / "ir", output_dir / "ir" / chunk_asset_prefix)
 
         report_path = chunk_dir / "run_report.json"
         chunk_report = read_json(report_path) if report_path.exists() else {}
@@ -1662,12 +1742,32 @@ def _merge_chunk_outputs(output_dir: Path, output_name: str, chunk_audit: list[d
     finalize_run_report(report)
     write_json(output_dir / "run_report.json", report)
     safe_progress(progress, f"MinerU chunked merge copied slides: count={len(set(copied_slide_numbers))}")
+    _cleanup_chunk_output_dirs(chunk_dirs_to_cleanup, output_dir, config=config, progress=progress)
 
 
 def _copy_chunk_subdir(source: Path, dest: Path) -> None:
     if not source.exists():
         return
     shutil.copytree(source, dest, dirs_exist_ok=True)
+
+
+def _cleanup_chunk_output_dirs(chunk_dirs: list[Path], final_output_dir: Path, *, config: AppConfig | None, progress) -> None:
+    if config is None or output_retention_mode(config) != "slim":
+        return
+    final_resolved = final_output_dir.resolve()
+    for chunk_dir in chunk_dirs:
+        try:
+            resolved = chunk_dir.resolve()
+        except OSError:
+            continue
+        if resolved == final_resolved or resolved.parent != final_resolved.parent:
+            safe_progress(progress, f"Chunk output cleanup skipped: {chunk_dir}")
+            continue
+        try:
+            shutil.rmtree(resolved)
+            safe_progress(progress, f"Chunk output cleaned by slim retention: {resolved}")
+        except OSError as exc:
+            safe_progress(progress, f"Chunk output cleanup skipped: {resolved}, reason={exc}")
 
 
 def _final_slide_no_for_chunk_slide(chunk, source_slide: int) -> int:
@@ -1722,7 +1822,7 @@ def _download_and_process_mineru_result(
         **task_ref,
     )
     safe_progress(progress, f"Processing MinerU artifact into Markdown: {artifact_dir}")
-    return process_mineru_artifact_task(
+    processed = process_mineru_artifact_task(
         artifact_dir,
         config,
         doc_name=doc_name,
@@ -1730,6 +1830,8 @@ def _download_and_process_mineru_result(
         source_path=source,
         progress=progress,
     )
+    cleanup_generated_cache_dir(cache_dir, config, progress=progress)
+    return processed
 
 
 def _download_mineru_artifact_only(

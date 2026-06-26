@@ -1,5 +1,73 @@
 # Changelog
 
+## 2026-06-26
+
+### Added
+
+- 新增输出保留模式：
+  - CLI 增加 `--output-retention slim|standard|debug`。
+  - 默认 `slim` 只保留 Markdown、必要 assets、meta、日志和 `run_report.json`，并在成功后清理生成的解析 cache。
+  - `standard` 额外保留 IR；`debug` 额外保留 `mineru_raw/`、`paddleocr_raw/` 和解析 cache。
+  - GUI “输出与并发”区增加保留模式选择。
+- 新增多文件解析调度参数：
+  - CLI 增加 `--parser-workers`，控制多文件上传/等待 MinerU/PaddleOCR 的并发，默认 `8`。
+  - CLI 增加 `--doc-workers`，控制多文件文档级融合/精修并发，默认 `1`。
+  - GUI 增加“解析/文档”并发输入，和 Vision/Brain 并发分开。
+- 新增 first-class `findings` 架构：
+  - 新报告使用 `pages[].findings.initial`、`brain_decisions`、`brain_discovered` 和 `summary.findings`。
+  - 旧 `suspects` 输出不再写入新的 run report。
+  - Brain 审阅输出升级为三段式 JSON：`decisions`、`new_findings`、`op_candidates`。
+  - Initial findings 现在明确包含 `deterministic_detector`、`validator_precheck`、`dual_engine_diff` 和 `vision_crop_evidence` 来源。
+- 新增可配置 Brain 上下文窗口：
+  - CLI 增加 `--brain-context-radius`，默认 `2`，`0` 表示只看当前页。
+  - GUI “并发”区域增加 Brain 上下文选择和自定义半径。
+  - `process.log` / Brain report 记录配置半径、实际上下文页和截断说明。
+- GUI 成本估算拆分 Vision 与 Brain：
+  - 主成本表显示 Vision 输入/输出/费用、Brain 输入/输出/费用和总费用。
+  - 新增 Brain 窗口成本对比表，默认比较 `0/1/2/3/5`。
+  - CLI 成本表同步显示 Vision/Brain 费用分项，并尊重 Brain 上下文窗口。
+
+### Verified
+
+- 使用既有 `群论笔记4.1` MinerU/PaddleOCR artifacts 真实验证 `dual_hybrid`：
+  - 输出：`markdown_output/findings_brain_window_verify/dual_4_1_findings_window_v3`。
+  - 配置：balanced，Vision workers `60`，Brain workers `60`，`--brain-context-radius 2`，Brain thinking disabled。
+  - 结果：`status=ok`，11/11 页，`summary.findings.total=224`，`brain_discovered_count=22`。
+  - `summary.findings.by_source`: `validator_precheck=36`、`dual_engine_diff=138`、`vision_crop_evidence=48`、`deterministic_detector=2`。
+  - Brain report 记录 `configured_radius=2`，实际上下文页数为 `3/4/5`。
+  - `run_report.json` 不再包含 `summary.suspects` 或 `pages[].suspects`。
+  - 最终 FULL Markdown 未发现 `[mineru]` / `[paddleocr]`、Traceback、reasoning、validator 文本或 `<details open>`。
+  - 本次耗时约 `96.8s`：48 个 crop Vision 请求约 `34.2s`，Brain 11 页约 `61.2s`；长尾来自 provider 响应，不是并发被移除。
+
+### Fixed
+
+- 修复扫描 PDF 页数识别失败：
+  - `estimate_pdf_pages()` 现在优先尝试 `pypdf/PyPDF2`，再尝试系统 `pdfinfo`，再 fallback 到直接 `/Page` marker 和压缩 object stream 解码。
+  - 已验证 `D:\大学学习\课程资料\lz毛概\2009年马原期末考试（A B）.pdf` 可识别为 9 页。
+- 优化双引擎本地多文件处理：
+  - 旧流程按文件串行：一个文件完成 MinerU/PaddleOCR 解析和后续融合精修后，才开始下一个文件。
+  - 新流程先跨文件并发准备解析 artifact；某个文件的 MinerU/PaddleOCR artifact 都就绪后，立即进入文档处理队列。
+  - 日志会显示解析并发、文档并发、Vision 并发和 Brain 并发。
+- 修复双引擎 `paddleocr` origin 触发 Brain op 合同校验失败的问题：
+  - `paddleocr` 现在是合法 block origin / vision evidence origin。
+  - PaddleOCR Markdown fallback block 补齐 `bbox`。
+  - 已用既有 `群论笔记4.1` MinerU/PaddleOCR artifact 验证 `ir/document_ir.json` 无 page IR contract error。
+- Brain 审阅从提示词约束升级为本地硬约束：
+  - 每个 Brain op 必须携带 `decision`、`evidence_type`、`confidence` 和具体目标。
+  - 低置信正文替换、缺少目标 block、缺少 checked span、整页 Markdown 改写会被本地拒绝。
+  - `op_audit` / summary 记录拒绝原因和 contract error code。
+- 修复空文本 `image_ref` / `figure_note` 被 deterministic refiner 当作空块删除的问题。只要 block 带图片路径或结构化图示信息，就保留给 renderer。
+- 图示说明 renderer 会把 Vision 返回的 JSON/近似 JSON 转成中文字段，不再把 `figure_type`、`relations`、`uncertainties` 等原始英文键名输出到用户 Markdown。
+
+### Verified
+
+- 真实双引擎验证输出：`markdown_output/real_contract_fix_smoke/real_contract_fix_4_1_v3`。
+- 配置：既有 MinerU/PaddleOCR artifact，`dual_hybrid`，balanced，Vision workers `60`，Brain workers `60`，Brain thinking disabled。
+- 结果：`status=ok`，11/11 页，`contract_error_codes={}`，`brain_discovered_count=27`。
+- 最终 Markdown 扫描未发现 API Key、Traceback、模型推理内容、validator 文本、provider 错误、`[mineru]` / `[paddleocr]` 候选标签、`<details open>` 或原始图示 JSON 键名。
+- 页面 3 图示保留为默认关闭的中文 `<details>` 块。
+- 本次耗时主要来自 Vision provider 长尾：48 个 crop Vision 请求约 `65.9s`，Brain 11 页约 `20.7s`。
+
 ## 2026-06-25
 
 ### Added

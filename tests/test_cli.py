@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from docpage2md_app import cli
+from docpage2md_app.config import AppConfig
 from docpage2md_app.files import write_json
 from docpage2md_app.input_inspection import build_page_chunks
 
@@ -34,6 +35,27 @@ def test_cli_build_config_exposes_ocr_confusion_opt_in(tmp_path):
     config = cli.build_config(args)
 
     assert config.fix_ocr_confusion is True
+
+
+def test_cli_build_config_exposes_retention_and_scheduler_workers(tmp_path):
+    args = cli.parse_args(
+        [
+            "--output",
+            str(tmp_path),
+            "--output-retention",
+            "debug",
+            "--parser-workers",
+            "12",
+            "--doc-workers",
+            "3",
+        ]
+    )
+
+    config = cli.build_config(args)
+
+    assert config.output_retention == "debug"
+    assert config.parser_workers == 12
+    assert config.max_docpage_workers == 3
     assert config.output_folder == str(tmp_path.resolve())
 
 
@@ -295,6 +317,46 @@ def test_cli_chunk_merge_renumbers_relative_slides(tmp_path):
     assert (output_dir / "assets" / "chunk_002" / "crop.png").exists()
     report = Path(output_dir / "run_report.json")
     assert report.exists()
+
+
+def test_cli_chunk_merge_slim_cleans_chunk_outputs_and_skips_debug_dirs(tmp_path):
+    output_dir = tmp_path / "out" / "Deck"
+    chunk_dir = tmp_path / "out" / "Deck__chunk_001"
+    (chunk_dir / "assets").mkdir(parents=True)
+    (chunk_dir / "assets" / "crop.png").write_bytes(b"png")
+    (chunk_dir / "ir").mkdir()
+    (chunk_dir / "ir" / "page_001_ir.json").write_text("{}", encoding="utf-8")
+    (chunk_dir / "mineru_raw").mkdir()
+    (chunk_dir / "mineru_raw" / "layout.json").write_text("{}", encoding="utf-8")
+    (chunk_dir / "Slide_01.md").write_text("# Slide 1\n\n![图](assets/crop.png)\n", encoding="utf-8")
+    write_json(chunk_dir / "Slide_01.meta.json", {"slide_no": 1, "status": "ok"})
+    write_json(
+        chunk_dir / "run_report.json",
+        {
+            "doc_name": "Deck__chunk_001",
+            "status": "ok",
+            "models": {},
+            "cost": {"estimated": None, "actual_tokens": None, "note": ""},
+            "mineru": {},
+            "pages": [{"slide_no": 1, "final": {"status": "ok", "included_in_full": True}, "validation": {"warnings": []}}],
+        },
+    )
+    chunks = build_page_chunks(2, chunk_size=1)
+
+    cli._merge_chunk_outputs(
+        output_dir,
+        "Deck",
+        [{"index": 1, "output_dir": str(chunk_dir)}],
+        chunks,
+        progress=None,
+        config=AppConfig(output_folder=str(tmp_path / "out"), output_retention="slim"),
+    )
+
+    assert (output_dir / "Slide_01.md").exists()
+    assert (output_dir / "assets" / "chunk_001" / "crop.png").exists()
+    assert not (output_dir / "mineru_raw").exists()
+    assert not (output_dir / "ir").exists()
+    assert not chunk_dir.exists()
 
 
 def test_cli_resolves_mineru_folder_batch_inputs(tmp_path):

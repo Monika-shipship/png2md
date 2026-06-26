@@ -1,4 +1,5 @@
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,7 @@ def test_gui_builds_single_file_hybrid_command(tmp_path):
     assert argv[argv.index("--engine-mode") + 1] == "hybrid"
     assert argv[argv.index("--document-type") + 1] == "handwritten_notes"
     assert argv[argv.index("--model-profile") + 1] == "balanced"
+    assert argv[argv.index("--output-retention") + 1] == "slim"
     assert argv[argv.index("--output") + 1] == str(tmp_path / "out")
     assert argv[argv.index("--page-ranges") + 1] == "1-5"
     assert argv[argv.index("--mineru-model-version") + 1] == "vlm"
@@ -50,6 +52,8 @@ def test_gui_builds_single_file_hybrid_command(tmp_path):
     assert argv[argv.index("--mineru-language") + 1] == "ch"
     assert argv[argv.index("--vision-workers") + 1] == "60"
     assert argv[argv.index("--brain-workers") + 1] == "60"
+    assert argv[argv.index("--parser-workers") + 1] == "8"
+    assert argv[argv.index("--doc-workers") + 1] == "1"
     assert argv[argv.index("--brain-thinking") + 1] == "disabled"
     assert argv[-2:] == [
         "--input-file",
@@ -199,13 +203,30 @@ def test_gui_adds_worker_override_args(tmp_path):
         output_folder=str(tmp_path / "out"),
         vision_workers="70",
         brain_workers=65,
+        parser_workers=30,
+        doc_workers=4,
     )
 
     argv = build_cli_argv(options)
 
     assert argv[argv.index("--vision-workers") + 1] == "70"
     assert argv[argv.index("--brain-workers") + 1] == "65"
+    assert argv[argv.index("--parser-workers") + 1] == "30"
+    assert argv[argv.index("--doc-workers") + 1] == "4"
     assert argv[argv.index("--brain-thinking") + 1] == "disabled"
+
+
+def test_gui_adds_output_retention_override_args(tmp_path):
+    options = GuiRunOptions(
+        source_value="https://example.com/notes.pdf",
+        source_kind="mineru_url",
+        output_folder=str(tmp_path / "out"),
+        output_retention="调试（保留原始数据）",
+    )
+
+    argv = build_cli_argv(options)
+
+    assert argv[argv.index("--output-retention") + 1] == "debug"
 
 
 def test_gui_adds_brain_thinking_override_args(tmp_path):
@@ -221,6 +242,19 @@ def test_gui_adds_brain_thinking_override_args(tmp_path):
 
     assert argv[argv.index("--brain-thinking") + 1] == "enabled"
     assert argv[argv.index("--brain-reasoning-effort") + 1] == "max"
+
+
+def test_gui_adds_brain_context_radius_override_args(tmp_path):
+    options = GuiRunOptions(
+        source_value="https://example.com/notes.pdf",
+        source_kind="mineru_url",
+        output_folder=str(tmp_path / "out"),
+        brain_context_radius="前后5页",
+    )
+
+    argv = build_cli_argv(options)
+
+    assert argv[argv.index("--brain-context-radius") + 1] == "5"
 
 
 def test_gui_concurrency_preset_updates_worker_entries():
@@ -367,6 +401,22 @@ def test_estimate_pdf_pages_from_pdf_markers(tmp_path):
     assert estimate_pdf_pages(pdf) == 2
 
 
+def test_estimate_pdf_pages_from_compressed_object_stream(tmp_path):
+    object_stream = b"1 0 2 20 3 41 " + b"<< /Type/Page >> << /Type /Pages /Count 2 >> << /Type /Page >>"
+    compressed = zlib.compress(object_stream)
+    pdf = tmp_path / "object-stream.pdf"
+    pdf.write_bytes(
+        b"%PDF-1.6\n"
+        b"10 0 obj\n"
+        + f"<< /Type /ObjStm /N 3 /First 14 /Filter /FlateDecode /Length {len(compressed)} >>\n".encode()
+        + b"stream\n"
+        + compressed
+        + b"\nendstream\nendobj\n"
+    )
+
+    assert estimate_pdf_pages(pdf) == 2
+
+
 def test_gui_cost_estimate_for_local_pdf_is_visible(tmp_path):
     pdf = tmp_path / "sample.pdf"
     pdf.write_bytes(
@@ -389,6 +439,26 @@ def test_gui_cost_estimate_for_local_pdf_is_visible(tmp_path):
     assert summary.total_cost is not None
     assert summary.confidence == "中"
     assert "MinerU 解析前" in summary.rows[0].note
+    assert summary.rows[0].vision_input_tokens > 0
+    assert summary.rows[0].brain_input_tokens > 0
+    assert summary.brain_window_rows
+
+
+def test_gui_cost_estimate_brain_window_changes_only_brain_tokens(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    pdf.write_bytes(
+        b"%PDF\n"
+        b"1 0 obj << /Type /Page >>\n"
+        b"2 0 obj << /Type /Page >>\n"
+        b"3 0 obj << /Type /Pages >>"
+    )
+    small = estimate_gui_cost(GuiRunOptions(source_kind="input_file", source_value=str(pdf), output_folder=str(tmp_path / "out"), brain_context_radius=0))
+    large = estimate_gui_cost(GuiRunOptions(source_kind="input_file", source_value=str(pdf), output_folder=str(tmp_path / "out"), brain_context_radius=5))
+
+    assert small.rows[0].vision_input_tokens == large.rows[0].vision_input_tokens
+    assert small.rows[0].vision_output_tokens == large.rows[0].vision_output_tokens
+    assert small.rows[0].brain_input_tokens < large.rows[0].brain_input_tokens
+    assert [row.radius for row in small.brain_window_rows] == [0, 1, 2, 3, 5]
 
 
 def test_gui_cost_estimate_for_local_image_uses_real_dimensions(tmp_path):
